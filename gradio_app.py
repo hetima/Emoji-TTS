@@ -53,6 +53,7 @@ DEFAULT_CONFIG   = "train_v1.yaml"
 FIXED_SECONDS    = 30.0
 DATASET_TOOLS    = BASE_DIR / "dataset_tools.py"
 DEFAULT_DATASET_DIR = BASE_DIR / "my_dataset"
+SPEAKERS_DIR        = BASE_DIR / "speakers"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # グローバルプロセス管理（学習・前処理の排他制御）
@@ -114,6 +115,100 @@ def _scan_lora_full_adapters() -> list[str]:
         if p.parent.name.endswith("_full"):
             result.append(str(p.parent))
     return result
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# スピーカーライブラリ ユーティリティ
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _scan_speakers() -> list[str]:
+    """speakers/ 配下のキャラクター名を列挙（ref.pt が存在するフォルダのみ）。"""
+    SPEAKERS_DIR.mkdir(parents=True, exist_ok=True)
+    return ["（使用しない）"] + sorted(
+        d.name for d in SPEAKERS_DIR.iterdir()
+        if d.is_dir() and (d / "ref.pt").exists()
+    )
+
+
+def _run_create_speaker(
+    char_name: str,
+    wav_path: str,
+    checkpoint: str,
+    model_device: str,
+    model_precision: str,
+    codec_device: str,
+    codec_precision: str,
+) -> str:
+    """参照WAVをDACVAEエンコードして speakers/{char_name}/ に3ファイルを生成する。"""
+    import shutil
+    import torch
+    import torchaudio
+
+    char_name = str(char_name).strip()
+    if not char_name:
+        return "エラー: キャラクター名を入力してください。"
+    if not wav_path or not Path(wav_path).is_file():
+        return "エラー: WAVファイルを選択してください。"
+
+    # 既存のキャッシュ済み runtime から codec を流用
+    try:
+        runtime_key = _build_runtime_key(
+            checkpoint, model_device, model_precision,
+            codec_device, codec_precision, False, "（なし）",
+        )
+        runtime, _ = get_cached_runtime(runtime_key)
+        codec = runtime.codec
+    except Exception as e:
+        return f"エラー: モデルを先に「モデル読み込み」ボタンで読み込んでください。\n{e}"
+
+    try:
+        wav, sr = torchaudio.load(wav_path)
+    except Exception as e:
+        return f"エラー: WAV読み込み失敗: {e}"
+
+    # モノラル化
+    if wav.shape[0] > 1:
+        wav = wav.mean(dim=0, keepdim=True)
+
+    # 最大30秒トリム
+    max_samples = int(30.0 * sr)
+    trimmed = wav.shape[1] > max_samples
+    if trimmed:
+        wav = wav[:, :max_samples]
+
+    duration_sec = round(wav.shape[1] / sr, 2)
+
+    try:
+        with torch.inference_mode():
+            latent = codec.encode_waveform(wav.unsqueeze(0), sample_rate=sr).cpu()
+    except Exception as e:
+        return f"エラー: DACVAEエンコード失敗: {e}"
+
+    out_dir = SPEAKERS_DIR / char_name
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    shutil.copy2(wav_path, out_dir / "ref.wav")
+    torch.save(latent, out_dir / "ref.pt")
+    (out_dir / "profile.json").write_text(
+        json.dumps(
+            {
+                "name": char_name,
+                "duration_sec": duration_sec,
+                "latent_shape": list(latent.shape),
+                "source_wav": str(wav_path),
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    msg = f"✅ 登録完了: speakers/{char_name}/\n"
+    msg += f"  ref.wav / ref.pt / profile.json\n"
+    msg += f"  潜在 shape: {tuple(latent.shape)}  ({duration_sec}秒)"
+    if trimmed:
+        msg += "\n  （30秒にトリム済み）"
+    return msg
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -393,7 +488,8 @@ def _clear_runtime_cache() -> str:
 def _run_generation(
     checkpoint, model_device, model_precision, codec_device, codec_precision, enable_watermark,
     lora_adapter, lora_scale,
-    text, uploaded_audio, num_steps, seed_raw, cfg_guidance_mode, cfg_scale_text, cfg_scale_speaker,
+    text, uploaded_audio, spk_ref_latent_path,
+    num_steps, seed_raw, cfg_guidance_mode, cfg_scale_text, cfg_scale_speaker,
     cfg_scale_raw, cfg_min_t, cfg_max_t, context_kv_cache,
     truncation_factor_raw, rescale_k_raw, rescale_sigma_raw,
     speaker_kv_scale_raw, speaker_kv_min_t_raw, speaker_kv_max_layers_raw,
@@ -415,8 +511,20 @@ def _run_generation(
     speaker_kv_max_layers = _parse_optional_int(speaker_kv_max_layers_raw, "speaker_kv_max_layers")
     seed = _parse_optional_int(seed_raw, "seed")
 
-    ref_wav = str(uploaded_audio) if uploaded_audio and str(uploaded_audio).strip() else None
-    no_ref  = ref_wav is None
+    # 参照音声の優先順位: スピーカーライブラリ > 直接アップロード > no-reference
+    _spk_pt = str(spk_ref_latent_path).strip() if spk_ref_latent_path else ""
+    ref_latent_path: str | None = None
+    ref_wav: str | None = None
+
+    if _spk_pt and Path(_spk_pt).is_file():
+        ref_latent_path = _spk_pt
+        no_ref = False
+    elif uploaded_audio and str(uploaded_audio).strip():
+        ref_wav = str(uploaded_audio)
+        no_ref = False
+    else:
+        no_ref = True
+
     num_candidates = max(1, int(num_candidates))
 
     runtime, reloaded = get_cached_runtime(runtime_key)
@@ -438,7 +546,7 @@ def _run_generation(
 
         result = runtime.synthesize(
             SamplingRequest(
-                text=str(text), ref_wav=ref_wav, ref_latent=None, no_ref=bool(no_ref),
+                text=str(text), ref_wav=ref_wav, ref_latent=ref_latent_path, no_ref=bool(no_ref),
                 seconds=FIXED_SECONDS, max_ref_seconds=30.0, max_text_len=None,
                 num_steps=int(num_steps),
                 seed=candidate_seed,
@@ -1812,8 +1920,101 @@ def build_ui() -> gr.Blocks:
 
                 gr.Markdown("## 音声生成")
                 infer_text = gr.Textbox(label="テキスト（合成したい文章）", lines=4)
+
                 with gr.Accordion("🎤 参照音声（省略するとno-referenceモードで生成）", open=False):
-                    infer_audio = gr.Audio(label="参照音声", type="filepath")
+                    # スピーカーライブラリ選択時のref_latentパスを保持する隠しフィールド
+                    spk_ref_latent_path = gr.Textbox(visible=False, value="")
+
+                    with gr.Tabs():
+                        # ── タブ1: 直接アップロード ──────────────────────
+                        with gr.Tab("🎙️ 直接アップロード"):
+                            infer_audio = gr.Audio(label="参照音声", type="filepath")
+                            # アップロード時はスピーカーライブラリの選択をクリア
+                            infer_audio.change(
+                                lambda v: "",
+                                inputs=[infer_audio],
+                                outputs=[spk_ref_latent_path],
+                            )
+
+                        # ── タブ2: スピーカーライブラリ ──────────────────
+                        with gr.Tab("🎭 スピーカーライブラリ"):
+                            with gr.Row():
+                                spk_select = gr.Dropdown(
+                                    label="キャラクター",
+                                    choices=_scan_speakers(),
+                                    value="（使用しない）",
+                                    scale=4,
+                                )
+                                spk_lib_refresh = gr.Button("🔄", scale=1)
+                            spk_info = gr.Textbox(
+                                label="登録情報", interactive=False, lines=2
+                            )
+
+                            def _on_spk_select(name):
+                                if not name or name == "（使用しない）":
+                                    return "", ""
+                                pt = SPEAKERS_DIR / name / "ref.pt"
+                                profile_p = SPEAKERS_DIR / name / "profile.json"
+                                pt_str = str(pt) if pt.exists() else ""
+                                info = ""
+                                if profile_p.exists():
+                                    try:
+                                        p = json.loads(profile_p.read_text(encoding="utf-8"))
+                                        info = (
+                                            f"duration: {p.get('duration_sec', '?')}秒  "
+                                            f"latent: {p.get('latent_shape', '?')}"
+                                        )
+                                    except Exception:
+                                        pass
+                                return pt_str, info
+
+                            spk_select.change(
+                                _on_spk_select,
+                                inputs=[spk_select],
+                                outputs=[spk_ref_latent_path, spk_info],
+                            )
+                            spk_lib_refresh.click(
+                                lambda: gr.Dropdown(choices=_scan_speakers()),
+                                outputs=[spk_select],
+                            )
+
+                        # ── タブ3: スピーカー登録 ─────────────────────────
+                        with gr.Tab("➕ スピーカー登録"):
+                            gr.Markdown(
+                                "参照WAVをDACVAEエンコードして `speakers/{名前}/` に\n"
+                                "`ref.wav` / `ref.pt` / `profile.json` の3ファイルを生成します。\n\n"
+                                "> **事前条件**: 上部の「📥 モデル読み込み」を完了してから実行してください。"
+                            )
+                            spk_reg_name = gr.Textbox(
+                                label="キャラクター名",
+                                placeholder="alice",
+                            )
+                            spk_reg_wav = gr.Audio(
+                                label="参照WAV（5〜30秒推奨、雑音なし）",
+                                type="filepath",
+                            )
+                            spk_reg_btn = gr.Button(
+                                "💾 登録", variant="primary"
+                            )
+                            spk_reg_status = gr.Textbox(
+                                label="結果", interactive=False, lines=4
+                            )
+
+                            spk_reg_btn.click(
+                                _run_create_speaker,
+                                inputs=[
+                                    spk_reg_name, spk_reg_wav,
+                                    infer_checkpoint,
+                                    model_device, model_precision,
+                                    codec_device, codec_precision,
+                                ],
+                                outputs=[spk_reg_status],
+                            )
+                            # 登録完了後にライブラリDropdownを自動更新
+                            spk_reg_btn.click(
+                                lambda: gr.Dropdown(choices=_scan_speakers()),
+                                outputs=[spk_select],
+                            )
 
                 # ── 感情スタイルプリセット ──────────────────────────────
                 with gr.Accordion("🎭 感情スタイル", open=True):
@@ -2100,7 +2301,8 @@ def build_ui() -> gr.Blocks:
                     inputs=[
                         infer_checkpoint, model_device, model_precision, codec_device, codec_precision, enable_watermark,
                         infer_lora_adapter, infer_lora_scale,
-                        infer_text, infer_audio, num_steps, seed_raw, cfg_guidance_mode,
+                        infer_text, infer_audio, spk_ref_latent_path,
+                        num_steps, seed_raw, cfg_guidance_mode,
                         cfg_scale_text, cfg_scale_speaker, cfg_scale_raw, cfg_min_t, cfg_max_t,
                         context_kv_cache, truncation_factor_raw, rescale_k_raw, rescale_sigma_raw,
                         speaker_kv_scale_raw, speaker_kv_min_t_raw, speaker_kv_max_layers_raw,
