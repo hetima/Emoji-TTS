@@ -9,11 +9,16 @@ from typing import Any
 import torch
 from torch.utils.data import Dataset
 
-from .codec import patchify_latent
+from .codec import patchify_latent, unpatchify_latent
 from .tokenizer import PretrainedTextTokenizer
 
 
-def _coerce_latent_shape(latent: torch.Tensor, latent_dim: int) -> torch.Tensor:
+def _coerce_latent_shape(
+    latent: torch.Tensor,
+    latent_dim: int,
+    latent_patch_size: int = 1,
+    source: str | None = None,
+) -> torch.Tensor:
     """
     Normalize latent tensor to (T, D).
     Accepts common layouts: (T, D), (D, T), (1, T, D), (1, D, T).
@@ -27,8 +32,28 @@ def _coerce_latent_shape(latent: torch.Tensor, latent_dim: int) -> torch.Tensor:
         return latent
     if latent.shape[0] == latent_dim:
         return latent.transpose(0, 1).contiguous()
+
+    expected_patched_dim = int(latent_dim) * int(latent_patch_size)
+    if latent_patch_size > 1 and latent.shape[1] == expected_patched_dim:
+        return unpatchify_latent(
+            latent.unsqueeze(0).contiguous(),
+            patch_size=int(latent_patch_size),
+            latent_dim=int(latent_dim),
+        )[0]
+    if latent_patch_size > 1 and latent.shape[0] == expected_patched_dim:
+        latent_t = latent.transpose(0, 1).contiguous()
+        return unpatchify_latent(
+            latent_t.unsqueeze(0),
+            patch_size=int(latent_patch_size),
+            latent_dim=int(latent_dim),
+        )[0]
+
+    src = f" ({source})" if source else ""
     raise ValueError(
-        f"Could not infer latent layout for shape={tuple(latent.shape)} and latent_dim={latent_dim}"
+        "Could not infer latent layout"
+        f"{src}: shape={tuple(latent.shape)} latent_dim={latent_dim} "
+        f"latent_patch_size={latent_patch_size} expected_patched_dim={expected_patched_dim}. "
+        "Supported layouts: (T,D), (D,T), (T,D*patch), (D*patch,T), with optional leading batch dim 1."
     )
 
 
@@ -42,12 +67,14 @@ class LatentTextDataset(Dataset):
         self,
         manifest_path: str | Path,
         latent_dim: int,
+        latent_patch_size: int = 1,
         max_latent_steps: int | None = None,
         subset_indices: list[int] | None = None,
     ):
         self.manifest_path = Path(manifest_path)
         self.manifest_dir = self.manifest_path.parent
         self.latent_dim = latent_dim
+        self.latent_patch_size = int(latent_patch_size)
         self.max_latent_steps = max_latent_steps
         subset_index_set: set[int] | None = None
         if subset_indices is not None:
@@ -86,7 +113,12 @@ class LatentTextDataset(Dataset):
     def _load_latent(self, latent_path_raw: str) -> torch.Tensor:
         latent_path = self._resolve_latent_path(latent_path_raw)
         latent = torch.load(latent_path, map_location="cpu", weights_only=True)
-        latent = _coerce_latent_shape(latent, self.latent_dim).float()
+        latent = _coerce_latent_shape(
+            latent,
+            self.latent_dim,
+            self.latent_patch_size,
+            source=str(latent_path),
+        ).float()
         if self.max_latent_steps is not None:
             latent = latent[: self.max_latent_steps]
         return latent
@@ -100,7 +132,7 @@ class LatentTextDataset(Dataset):
 
         ref_index = index
         speaker_id = item.get("speaker_id")
-        has_speaker = speaker_id is not None
+        has_speaker = False
         if speaker_id is not None:
             speaker_key = str(speaker_id)
             candidates = self.speaker_to_indices.get(speaker_key, [])
@@ -108,6 +140,7 @@ class LatentTextDataset(Dataset):
                 alternatives = [i for i in candidates if i != index]
                 if alternatives:
                     ref_index = random.choice(alternatives)
+                    has_speaker = True
 
         if ref_index == index:
             ref_latent = latent

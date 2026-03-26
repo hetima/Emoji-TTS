@@ -66,6 +66,16 @@ class LowRankAdaLN(nn.Module):
         self.shift_up = nn.Linear(rank, model_dim, bias=True)
         self.scale_up = nn.Linear(rank, model_dim, bias=True)
         self.gate_up = nn.Linear(rank, model_dim, bias=True)
+        # Match Echo/JAX AdaLN behavior: zero-init output projections.
+        nn.init.zeros_(self.shift_up.weight)
+        nn.init.zeros_(self.scale_up.weight)
+        nn.init.zeros_(self.gate_up.weight)
+        if self.shift_up.bias is not None:
+            nn.init.zeros_(self.shift_up.bias)
+        if self.scale_up.bias is not None:
+            nn.init.zeros_(self.scale_up.bias)
+        if self.gate_up.bias is not None:
+            nn.init.zeros_(self.gate_up.bias)
 
     def forward(
         self, x: torch.Tensor, cond_embed: torch.Tensor
@@ -517,6 +527,22 @@ class TextToLatentRFDiT(nn.Module):
             self._freqs_cis_cache = cache
         return cache[:seq_len]
 
+    @staticmethod
+    def _prepend_masked_mean_token(
+        state: torch.Tensor,
+        mask: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        Prepend one global summary token computed as masked mean over time.
+        """
+        mask_f = mask.unsqueeze(-1).to(dtype=state.dtype)
+        denom = mask_f.sum(dim=1, keepdim=True).clamp_min(1.0)
+        mean_token = (state * mask_f).sum(dim=1, keepdim=True) / denom
+        has_any = mask.any(dim=1, keepdim=True)
+        state = torch.cat([mean_token, state], dim=1)
+        mask = torch.cat([has_any, mask], dim=1)
+        return state, mask
+
     def encode_conditions(
         self,
         text_input_ids: torch.Tensor,
@@ -540,6 +566,7 @@ class TextToLatentRFDiT(nn.Module):
         ref_state = self.speaker_encoder(ref_latent, ref_mask)
         text_state = self.text_norm(text_state)
         ref_state = self.speaker_norm(ref_state)
+        ref_state, ref_mask = self._prepend_masked_mean_token(ref_state, ref_mask)
         return text_state, text_mask, ref_state, ref_mask
 
     def forward_with_encoded_conditions(

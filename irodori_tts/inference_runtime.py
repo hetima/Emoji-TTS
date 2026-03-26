@@ -155,6 +155,8 @@ class RuntimeKey:
     model_precision: str = "fp32"
     codec_device: str = "cpu"
     codec_precision: str = "fp32"
+    codec_deterministic_encode: bool = True
+    codec_deterministic_decode: bool = True
     enable_watermark: bool = False
     compile_model: bool = False
     compile_dynamic: bool = False
@@ -167,6 +169,10 @@ class SamplingRequest:
     ref_wav: str | None = None
     ref_latent: str | None = None
     no_ref: bool = False
+    ref_normalize_db: float | None = -16.0
+    ref_ensure_max: bool = True
+    num_candidates: int = 1
+    decode_mode: str = "sequential"
     seconds: float = 30.0
     max_ref_seconds: float | None = 30.0
     max_text_len: int | None = None
@@ -196,6 +202,7 @@ class SamplingRequest:
 @dataclass
 class SamplingResult:
     audio: torch.Tensor
+    audios: list[torch.Tensor]
     sample_rate: int
     stage_timings: list[tuple[str, float]]
     total_to_decode: float
@@ -375,24 +382,30 @@ def _apply_lora_settings(
     lora_disabled_modules: tuple[str, ...],
 ) -> None:
     """推論開始時にLoRAスケール・無効モジュールを適用する。"""
-    try:
-        for name, module in model.named_modules():
-            if hasattr(module, "scaling"):
-                for adapter_name in getattr(module, "scaling", {}):
-                    module.scaling[adapter_name] = lora_scale
-    except Exception:
-        pass
+    disabled_set = set(lora_disabled_modules) if lora_disabled_modules else set()
+    applied = 0
+    for name, module in model.named_modules():
+        if not hasattr(module, "scaling"):
+            continue
+        effective_scale = 0.0 if name in disabled_set else lora_scale
+        for adapter_name in list(getattr(module, "scaling", {})):
+            module.scaling[adapter_name] = effective_scale
+            applied += 1
+    if applied == 0:
+        import warnings
+        warnings.warn(
+            "lora_path is set but no LoRA scaling layers were found in the model. "
+            "LoRA scale/disabled_modules settings may not have taken effect.",
+            stacklevel=3,
+        )
 
 
 def _restore_lora_defaults(model) -> None:
     """推論終了後にLoRAスケールをデフォルト (1.0) に戻す。"""
-    try:
-        for name, module in model.named_modules():
-            if hasattr(module, "scaling"):
-                for adapter_name in getattr(module, "scaling", {}):
-                    module.scaling[adapter_name] = 1.0
-    except Exception:
-        pass
+    for module in model.modules():
+        if hasattr(module, "scaling"):
+            for adapter_name in list(getattr(module, "scaling", {})):
+                module.scaling[adapter_name] = 1.0
 
 
 class InferenceRuntime:
@@ -486,8 +499,9 @@ class InferenceRuntime:
                 default_text_max_len = int(ckpt_text_max_len)
 
         # pyファイル基準のcheckpoints/codecsフォルダをキャッシュ先に使用
+        codec_repo_safe = str(key.codec_repo).replace("/", "_").replace("\\", "_")
         _codec_cache_dir = (
-            Path(__file__).resolve().parent.parent / "checkpoints" / "codecs"
+            Path(__file__).resolve().parent.parent / "checkpoints" / "codecs" / codec_repo_safe
         )
         _codec_cache_dir.mkdir(parents=True, exist_ok=True)
         codec = DACVAECodec.load(
@@ -495,6 +509,8 @@ class InferenceRuntime:
             device=str(codec_device),
             dtype=codec_dtype,
             enable_watermark=bool(key.enable_watermark),
+            deterministic_encode=bool(key.codec_deterministic_encode),
+            deterministic_decode=bool(key.codec_deterministic_decode),
             local_dir=str(_codec_cache_dir),
         )
         if model_cfg.latent_dim != codec.latent_dim:
@@ -517,17 +533,24 @@ class InferenceRuntime:
         self,
         *,
         req: SamplingRequest,
+        batch_size: int,
         messages: list[str],
     ) -> tuple[torch.Tensor, torch.Tensor]:
         runtime_dtype = next(self.model.parameters()).dtype
         if req.no_ref:
             ref_len = max(1, int(self.model_cfg.speaker_patch_size))
             ref_latent_patched = torch.zeros(
-                (1, ref_len, self.model_cfg.latent_dim * self.model_cfg.latent_patch_size),
+                (
+                    batch_size,
+                    ref_len,
+                    self.model_cfg.latent_dim * self.model_cfg.latent_patch_size,
+                ),
                 device=self.model_device,
                 dtype=runtime_dtype,
             )
-            ref_mask = torch.zeros((1, ref_len), dtype=torch.bool, device=self.model_device)
+            ref_mask = torch.zeros(
+                (batch_size, ref_len), dtype=torch.bool, device=self.model_device
+            )
             return ref_latent_patched, ref_mask
 
         if req.ref_wav is None and req.ref_latent is None:
@@ -560,7 +583,18 @@ class InferenceRuntime:
                         f"Trimming from {float(wav.shape[1]) / float(sr):.2f}s to {float(max_ref_samples) / float(sr):.2f}s."
                     )
                     wav = wav[:, :max_ref_samples]
-            ref_latent = self.codec.encode_waveform(wav.unsqueeze(0), sample_rate=int(sr)).cpu()
+            if req.ref_normalize_db is not None:
+                messages.append(
+                    f"info: reference loudness normalize enabled (target_db={float(req.ref_normalize_db):.2f}, includes peak safety scaling)."
+                )
+            elif req.ref_ensure_max:
+                messages.append("info: reference peak safety scaling enabled (ensure_max=True).")
+            ref_latent = self.codec.encode_waveform(
+                wav.unsqueeze(0),
+                sample_rate=int(sr),
+                normalize_db=req.ref_normalize_db,
+                ensure_max=bool(req.ref_ensure_max),
+            ).cpu()
 
         if max_ref_latent_steps is not None and ref_latent.shape[1] > max_ref_latent_steps:
             messages.append(
@@ -576,8 +610,10 @@ class InferenceRuntime:
             raise ValueError(
                 "Reference latent length became zero after patchify. Use longer reference audio."
             )
+        if batch_size > 1:
+            ref_latent_patched = ref_latent_patched.repeat(batch_size, 1, 1)
         ref_mask = torch.ones(
-            (1, ref_latent_patched.shape[1]), dtype=torch.bool, device=self.model_device
+            (batch_size, ref_latent_patched.shape[1]), dtype=torch.bool, device=self.model_device
         )
         return ref_latent_patched, ref_mask
 
@@ -596,7 +632,7 @@ class InferenceRuntime:
             (
                 "[runtime] start synthesize "
                 "model_device={} model_precision={} codec_device={} codec_precision={} "
-                "watermark={} mode={} seconds={} steps={} seed={}"
+                "watermark={} mode={} seconds={} steps={} seed={} candidates={} decode_mode={}"
             ).format(
                 self.key.model_device,
                 self.key.model_precision,
@@ -607,11 +643,21 @@ class InferenceRuntime:
                 req.seconds,
                 req.num_steps,
                 "random" if req.seed is None else int(req.seed),
+                req.num_candidates,
+                req.decode_mode,
             )
         )
 
         if req.seconds <= 0:
             raise ValueError(f"seconds must be > 0, got {req.seconds}")
+        num_candidates = int(req.num_candidates)
+        if num_candidates <= 0:
+            raise ValueError(f"num_candidates must be > 0, got {num_candidates}")
+        decode_mode = str(req.decode_mode).strip().lower()
+        if decode_mode not in {"sequential", "batch"}:
+            raise ValueError(
+                f"Unsupported decode_mode={req.decode_mode!r}. Expected one of: sequential, batch."
+            )
 
         raw_text = str(req.text)
         normalized_text = normalize_text(raw_text).strip()
@@ -682,13 +728,16 @@ class InferenceRuntime:
 
         with self._infer_lock, torch.inference_mode():
             # LoRA設定の動的適用
-            _lora_active = self.key.lora_path is not None and hasattr(self.model, "set_adapter")
+            _lora_active = self.key.lora_path is not None and any(
+                hasattr(m, "scaling") for m in self.model.modules()
+            )
             if _lora_active:
                 _apply_lora_settings(self.model, req.lora_scale, req.lora_disabled_modules)
             try:
                 t0 = _measure_start(self.model_device)
                 text_ids, text_mask = self.tokenizer.batch_encode(
-                    [normalized_text], max_length=text_max_len
+                    [normalized_text] * num_candidates,
+                    max_length=text_max_len,
                 )
                 stage_sec = _measure_end(self.model_device, t0)
                 stage_timings.append(("tokenize_text", stage_sec))
@@ -712,7 +761,11 @@ class InferenceRuntime:
 
                 t0 = _measure_start(self.model_device, self.codec_device)
                 msg_count_before_ref = len(messages)
-                ref_latent, ref_mask = self._load_reference_latent(req=req, messages=messages)
+                ref_latent, ref_mask = self._load_reference_latent(
+                    req=req,
+                    batch_size=num_candidates,
+                    messages=messages,
+                )
                 stage_sec = _measure_end(self.model_device, t0, self.codec_device)
                 stage_timings.append(("prepare_reference", stage_sec))
                 for msg in messages[msg_count_before_ref:]:
@@ -758,26 +811,48 @@ class InferenceRuntime:
                 z = z[:, :latent_steps]
 
                 t0 = _measure_start(self.model_device, self.codec_device)
-                audio = self.codec.decode_latent(z).cpu()
+                trimmed_audios: list[torch.Tensor] = []
+                if decode_mode == "batch":
+                    audio_batch = self.codec.decode_latent(z).cpu()
+                    for i in range(num_candidates):
+                        audio_i = audio_batch[i]
+                        max_samples = target_samples
+                        if bool(req.trim_tail):
+                            flattening_point = find_flattening_point(
+                                z[i],
+                                window_size=max(1, int(req.tail_window_size)),
+                                std_threshold=float(req.tail_std_threshold),
+                                mean_threshold=float(req.tail_mean_threshold),
+                            )
+                            flattening_samples = int(
+                                flattening_point * int(self.codec.model.hop_length)
+                            )
+                            if flattening_samples > 0:
+                                max_samples = min(max_samples, flattening_samples)
+                        trimmed_audios.append(audio_i[:, :max_samples])
+                else:
+                    for i in range(num_candidates):
+                        audio_i = self.codec.decode_latent(z[i : i + 1]).cpu()[0]
+                        max_samples = target_samples
+                        if bool(req.trim_tail):
+                            flattening_point = find_flattening_point(
+                                z[i],
+                                window_size=max(1, int(req.tail_window_size)),
+                                std_threshold=float(req.tail_std_threshold),
+                                mean_threshold=float(req.tail_mean_threshold),
+                            )
+                            flattening_samples = int(
+                                flattening_point * int(self.codec.model.hop_length)
+                            )
+                            if flattening_samples > 0:
+                                max_samples = min(max_samples, flattening_samples)
+                        trimmed_audios.append(audio_i[:, :max_samples])
                 stage_sec = _measure_end(self.model_device, t0, self.codec_device)
                 stage_timings.append(("decode_latent", stage_sec))
-                _log(f"[runtime] decode_latent: {stage_sec * 1000.0:.1f} ms")
+                _log(f"[runtime] decode_latent ({decode_mode}): {stage_sec * 1000.0:.1f} ms")
 
                 total_to_decode = _measure_end(self.model_device, post_load_t0, self.codec_device)
                 _log(f"[runtime] total_to_decode: {total_to_decode:.3f} s")
-
-                max_samples = target_samples
-                if bool(req.trim_tail):
-                    flattening_point = find_flattening_point(
-                        z[0],
-                        window_size=max(1, int(req.tail_window_size)),
-                        std_threshold=float(req.tail_std_threshold),
-                        mean_threshold=float(req.tail_mean_threshold),
-                    )
-                    flattening_samples = int(flattening_point * int(self.codec.model.hop_length))
-                    if flattening_samples > 0:
-                        max_samples = min(max_samples, flattening_samples)
-                audio = audio[..., :max_samples]
 
             finally:
                 if _lora_active:
@@ -785,7 +860,8 @@ class InferenceRuntime:
 
         _log("[runtime] done synthesize")
         return SamplingResult(
-            audio=audio[0],
+            audio=trimmed_audios[0],
+            audios=trimmed_audios,
             sample_rate=int(self.codec.sample_rate),
             stage_timings=stage_timings,
             total_to_decode=total_to_decode,

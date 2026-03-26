@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import json
 import math
 import os
 import random
@@ -40,6 +41,7 @@ from irodori_tts.tokenizer import PretrainedTextTokenizer
 WANDB_MODES = {"online", "offline", "disabled"}
 CHECKPOINT_STEP_RE = re.compile(r"^checkpoint_(\d+)\.pt$")
 CHECKPOINT_BEST_VAL_LOSS_RE = re.compile(r"^checkpoint_best_val_loss_(\d+)_(-?\d+(?:\.\d+)?)\.pt$")
+SAFETENSORS_CONFIG_META_KEY = "config_json"
 
 # pyファイル基準のcheckpointsフォルダ（トークナイザー等のHFキャッシュ先）
 _PROJECT_CHECKPOINTS_DIR = Path(__file__).resolve().parent / "checkpoints"
@@ -533,6 +535,57 @@ def initialize_text_embedding_from_pretrained(
     del text_backbone
 
 
+def _load_model_state_from_checkpoint(path: Path) -> tuple[dict[str, torch.Tensor], dict | None]:
+    if path.suffix.lower() == ".safetensors":
+        from safetensors import safe_open
+        from safetensors.torch import load_file as load_safetensors_file
+
+        checkpoint_model_cfg = None
+        with safe_open(str(path), framework="pt", device="cpu") as handle:
+            metadata = dict(handle.metadata() or {})
+        config_json = metadata.get(SAFETENSORS_CONFIG_META_KEY)
+        if config_json:
+            parsed = json.loads(config_json)
+            if isinstance(parsed, dict):
+                checkpoint_model_cfg = parsed
+        return load_safetensors_file(str(path), device="cpu"), checkpoint_model_cfg
+
+    payload = torch.load(path, map_location="cpu", weights_only=True)
+    if not isinstance(payload, dict):
+        raise ValueError(f"Checkpoint payload must be a dictionary, got {type(payload)!r}.")
+
+    raw_model = payload.get("model")
+    if raw_model is None and all(isinstance(v, torch.Tensor) for v in payload.values()):
+        raw_model = payload
+    if not isinstance(raw_model, dict):
+        raise ValueError(f"Checkpoint does not contain a model state dictionary: {path}")
+
+    checkpoint_model_cfg = payload.get("model_config")
+    if checkpoint_model_cfg is not None and not isinstance(checkpoint_model_cfg, dict):
+        raise ValueError(f"Checkpoint model_config must be a dictionary when present: {path}")
+    return raw_model, checkpoint_model_cfg
+
+
+def _check_model_config_compatibility(
+    checkpoint_path: Path,
+    checkpoint_model_cfg: dict | None,
+    current_model_cfg: ModelConfig,
+) -> None:
+    if checkpoint_model_cfg is None:
+        return
+
+    for key in ("latent_dim", "latent_patch_size", "text_vocab_size", "text_dim", "model_dim"):
+        checkpoint_value = checkpoint_model_cfg.get(key)
+        if checkpoint_value is None:
+            continue
+        current_value = getattr(current_model_cfg, key)
+        if int(checkpoint_value) != int(current_value):
+            raise ValueError(
+                f"Checkpoint/config mismatch for '{key}': checkpoint={checkpoint_value} "
+                f"current={current_value} ({checkpoint_path})"
+            )
+
+
 def resolve_dist_env() -> tuple[int, int, int]:
     world_size = int(os.environ.get("WORLD_SIZE", "1"))
     rank = int(os.environ.get("RANK", "0"))
@@ -725,7 +778,19 @@ def main() -> None:
         default=None,
         help="Enable torch.compile for the training model.",
     )
-    parser.add_argument("--resume", default=None)
+    parser.add_argument(
+        "--resume",
+        default=None,
+        help="Resume full training state from a training checkpoint (.pt).",
+    )
+    parser.add_argument(
+        "--init-checkpoint",
+        default=None,
+        help=(
+            "Initialize model weights from a checkpoint (.pt or .safetensors) and start a new run "
+            "with fresh optimizer / scheduler state."
+        ),
+    )
     parser.add_argument("--max-steps", type=int, default=200000)
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument(
@@ -969,6 +1034,8 @@ def main() -> None:
     )
     parser.set_defaults(ddp_find_unused_parameters=None)
     args = parser.parse_args()
+    if args.resume is not None and args.init_checkpoint is not None:
+        raise ValueError("--resume and --init-checkpoint are mutually exclusive.")
 
     rank, world_size, local_rank, distributed, device = setup_distributed(args.device)
     is_main_process = rank == 0
@@ -1095,6 +1162,51 @@ def main() -> None:
     if cli_provided(raw_argv, "--latent-patch-size"):
         model_cfg = replace(model_cfg, latent_patch_size=args.latent_patch_size)
 
+    # --resume 未指定時はデフォルトの safetensors を自動参照（v2優先）
+    _DEFAULT_PRETRAINED_SAFETENSORS_CANDIDATES = [
+        _PROJECT_CHECKPOINTS_DIR / "Aratako_Irodori-TTS-500M-v2" / "model.safetensors",
+        _PROJECT_CHECKPOINTS_DIR / "Aratako_Irodori-TTS-500M" / "model.safetensors",
+    ]
+    if args.resume is None:
+        _auto_resume = next((p for p in _DEFAULT_PRETRAINED_SAFETENSORS_CANDIDATES if p.exists()), None)
+        if _auto_resume is not None:
+            args.resume = str(_auto_resume)
+            if is_main_process:
+                print(f"--resume not specified. Auto-loading: {args.resume}")
+
+    # safetensors を resume する場合、必要に応じてモデル設定をチェックポイントに同期
+    if args.resume is not None and Path(args.resume).suffix.lower() == ".safetensors":
+        from safetensors import safe_open
+
+        resume_path = Path(args.resume).expanduser()
+        checkpoint_model_cfg: dict | None = None
+        with safe_open(str(resume_path), framework="pt", device="cpu") as handle:
+            metadata = dict(handle.metadata() or {})
+        config_json = metadata.get(SAFETENSORS_CONFIG_META_KEY)
+        if config_json:
+            parsed = json.loads(config_json)
+            if isinstance(parsed, dict):
+                checkpoint_model_cfg = parsed
+
+        if checkpoint_model_cfg is not None:
+            latent_dim_overridden = cli_provided(raw_argv, "--latent-dim")
+            latent_patch_overridden = cli_provided(raw_argv, "--latent-patch-size")
+            sync_kwargs: dict[str, int] = {}
+            for key in ("latent_dim", "latent_patch_size", "text_vocab_size", "text_dim", "model_dim"):
+                if key == "latent_dim" and latent_dim_overridden:
+                    continue
+                if key == "latent_patch_size" and latent_patch_overridden:
+                    continue
+                value = checkpoint_model_cfg.get(key)
+                if value is not None:
+                    sync_kwargs[key] = int(value)
+            if sync_kwargs:
+                model_cfg = replace(model_cfg, **sync_kwargs)
+                if is_main_process:
+                    print(
+                        f"Synchronized model config from resume safetensors metadata: {resume_path}"
+                    )
+
     set_seed(train_cfg.seed + rank)
     if not (0.0 <= train_cfg.text_condition_dropout <= 1.0):
         raise ValueError(
@@ -1219,6 +1331,7 @@ def main() -> None:
     full_dataset = LatentTextDataset(
         manifest_path=train_cfg.manifest_path,
         latent_dim=model_cfg.latent_dim,
+        latent_patch_size=model_cfg.latent_patch_size,
         max_latent_steps=train_cfg.max_latent_steps,
     )
     train_dataset = full_dataset
@@ -1232,12 +1345,14 @@ def main() -> None:
         train_dataset = LatentTextDataset(
             manifest_path=train_cfg.manifest_path,
             latent_dim=model_cfg.latent_dim,
+            latent_patch_size=model_cfg.latent_patch_size,
             max_latent_steps=train_cfg.max_latent_steps,
             subset_indices=train_indices,
         )
         valid_dataset = LatentTextDataset(
             manifest_path=train_cfg.manifest_path,
             latent_dim=model_cfg.latent_dim,
+            latent_patch_size=model_cfg.latent_patch_size,
             max_latent_steps=train_cfg.max_latent_steps,
             subset_indices=valid_indices,
         )
@@ -1342,10 +1457,12 @@ def main() -> None:
     raw_model = TextToLatentRFDiT(model_cfg).to(device)
     # デフォルト safetensors が存在する場合も resume 扱いとして扱い、
     # テキスト埋め込みの個別初期化はスキップする
-    _default_safetensors_exists = (
-        _PROJECT_CHECKPOINTS_DIR / "Aratako_Irodori-TTS-500M" / "model.safetensors"
-    ).exists()
-    if args.resume is None and not _default_safetensors_exists:
+    _DEFAULT_PRETRAINED_SAFETENSORS_CANDIDATES = [
+        _PROJECT_CHECKPOINTS_DIR / "Aratako_Irodori-TTS-500M-v2" / "model.safetensors",
+        _PROJECT_CHECKPOINTS_DIR / "Aratako_Irodori-TTS-500M" / "model.safetensors",
+    ]
+    _default_safetensors_exists = any(p.exists() for p in _DEFAULT_PRETRAINED_SAFETENSORS_CANDIDATES)
+    if args.resume is None and args.init_checkpoint is None and not _default_safetensors_exists:
         if distributed:
             if is_main_process:
                 print(
@@ -1468,11 +1585,21 @@ def main() -> None:
                 f"Gradient accumulation enabled: steps={train_cfg.gradient_accumulation_steps} (effective global batch={train_cfg.batch_size * world_size * train_cfg.gradient_accumulation_steps})."
             )
 
+    # --init-checkpoint: モデル重みのみ読み込み、optimizer/schedulerは新規
+    if args.init_checkpoint is not None:
+        init_checkpoint_path = Path(args.init_checkpoint).expanduser()
+        init_state, init_model_cfg = _load_model_state_from_checkpoint(init_checkpoint_path)
+        _check_model_config_compatibility(init_checkpoint_path, init_model_cfg, model_cfg)
+        raw_model.load_state_dict(init_state)
+        if is_main_process:
+            print(f"Initialized model weights from: {init_checkpoint_path}")
+
     # --resume 未指定時はデフォルトの safetensors を自動参照
-    _DEFAULT_PRETRAINED_SAFETENSORS = (
-        _PROJECT_CHECKPOINTS_DIR / "Aratako_Irodori-TTS-500M" / "model.safetensors"
+    _DEFAULT_PRETRAINED_SAFETENSORS = next(
+        (p for p in _DEFAULT_PRETRAINED_SAFETENSORS_CANDIDATES if p.exists()),
+        None,
     )
-    if args.resume is None and _DEFAULT_PRETRAINED_SAFETENSORS.exists():
+    if args.resume is None and _DEFAULT_PRETRAINED_SAFETENSORS is not None:
         args.resume = str(_DEFAULT_PRETRAINED_SAFETENSORS)
         if is_main_process:
             print(f"--resume not specified. Auto-loading: {args.resume}")

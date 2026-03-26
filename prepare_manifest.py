@@ -97,6 +97,21 @@ def _coerce_audio(audio_value: Any) -> tuple[torch.Tensor, int]:
     return wav, sr
 
 
+def parse_optional_float(value: str) -> float | None:
+    raw = str(value).strip().lower()
+    if raw in {"none", "null", "off", "disable", "disabled"}:
+        return None
+    try:
+        out = float(raw)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            f"Expected float or one of [none, null, off, disable, disabled], got: {value}"
+        ) from exc
+    if not math.isfinite(out):
+        raise argparse.ArgumentTypeError(f"normalize-db must be finite, got: {value}")
+    return out
+
+
 def _parse_data_files(items: list[str] | None) -> Any:
     if items is None:
         return None
@@ -512,7 +527,23 @@ def _run_worker(
     else:
         ds = ds.cast_column(args.audio_column, Audio())
 
-    codec = DACVAECodec.load(repo_id=args.codec_repo, device=str(device))
+    if args.normalize_db is not None:
+        try:
+            from audiotools import AudioSignal
+
+            del AudioSignal
+        except Exception as exc:
+            raise RuntimeError(
+                "--normalize-db requires audiotools. Install audiotools or set --normalize-db none."
+            ) from exc
+
+    codec = DACVAECodec.load(
+        repo_id=args.codec_repo,
+        device=str(device),
+        deterministic_encode=bool(args.codec_deterministic_encode),
+        deterministic_decode=bool(args.codec_deterministic_decode),
+        normalize_db=args.normalize_db,
+    )
 
     start = max(0, int(args.skip_samples))
     total: int | None = None
@@ -756,7 +787,35 @@ def main() -> None:
         "--output-manifest", required=True, help="Output JSONL path for latent manifest"
     )
     parser.add_argument("--latent-dir", required=True, help="Directory to write latent .pt files")
-    parser.add_argument("--codec-repo", default="facebook/dacvae-watermarked")
+    parser.add_argument(
+        "--codec-repo",
+        default="Aratako/Semantic-DACVAE-Japanese-32dim",
+        help=(
+            "DACVAE repository or local checkpoint path. "
+            "Default is v2 32-dim codec."
+        ),
+    )
+    parser.add_argument(
+        "--codec-deterministic-encode",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Use deterministic DACVAE encode path (default: enabled).",
+    )
+    parser.add_argument(
+        "--codec-deterministic-decode",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Use deterministic DACVAE decode watermark-message path (default: enabled).",
+    )
+    parser.add_argument(
+        "--normalize-db",
+        type=parse_optional_float,
+        default=-16.0,
+        help=(
+            "Target loudness normalization in dB before encode (DAC-like). "
+            "Set to 'none' to disable. Default: -16."
+        ),
+    )
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument(
         "--num-gpus",

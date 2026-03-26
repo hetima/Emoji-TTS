@@ -48,8 +48,13 @@ CONFIGS_DIR      = BASE_DIR / "configs"
 LOGS_DIR         = BASE_DIR / "logs"
 OUTPUTS_DIR      = BASE_DIR / "gradio_outputs"
 LORA_DIR         = BASE_DIR / "lora"
-DEFAULT_HF_REPO  = "Aratako/Irodori-TTS-500M"
-DEFAULT_CONFIG   = "train_v1.yaml"
+DEFAULT_HF_REPO  = "Aratako/Irodori-TTS-500M-v2"
+DEFAULT_CONFIG   = "train_v2.yaml"
+DEFAULT_PREPARE_CODEC_REPO = "Aratako/Semantic-DACVAE-Japanese-32dim"
+PREPARE_CODEC_REPO_CHOICES = [
+    "Aratako/Semantic-DACVAE-Japanese-32dim",  # v2 (dim32)
+    "facebook/dacvae-watermarked",             # v1 (dim128)
+]
 FIXED_SECONDS    = 30.0
 DATASET_TOOLS    = BASE_DIR / "dataset_tools.py"
 DEFAULT_DATASET_DIR = BASE_DIR / "my_dataset"
@@ -458,10 +463,12 @@ def _build_runtime_key(checkpoint, model_device, model_precision, codec_device, 
     return RuntimeKey(
         checkpoint=checkpoint_path,
         model_device=str(model_device),
-        codec_repo="facebook/dacvae-watermarked",
+        codec_repo="Aratako/Semantic-DACVAE-Japanese-32dim",
         model_precision=str(model_precision),
         codec_device=str(codec_device),
         codec_precision=str(codec_precision),
+        codec_deterministic_encode=True,
+        codec_deterministic_decode=True,
         enable_watermark=bool(enable_watermark),
         compile_model=False,
         compile_dynamic=False,
@@ -681,7 +688,7 @@ def _build_manifest_command(
     dataset,
     split,
     audio_col, text_col, speaker_col,
-    output_manifest, latent_dir, device,
+    output_manifest, latent_dir, device, codec_repo,
 ) -> list[str]:
     def _s(val, fallback=""):
         if val is None or isinstance(val, (dict, list)):
@@ -711,6 +718,7 @@ def _build_manifest_command(
         "--output-manifest", _s(output_manifest),
         "--latent-dir",      _s(latent_dir),
         "--device",          _s(device, "cpu"),
+        "--codec-repo",      _s(codec_repo, DEFAULT_PREPARE_CODEC_REPO),
     ]
     spk = _s(speaker_col)
     if spk:
@@ -720,22 +728,22 @@ def _build_manifest_command(
 
 def _manifest_cmd_preview(
     data_source_mode, dataset, split, audio_col, text_col, speaker_col,
-    output_manifest, latent_dir, device,
+    output_manifest, latent_dir, device, codec_repo,
 ) -> str:
     return " ".join(_build_manifest_command(
         data_source_mode, dataset, split, audio_col, text_col, speaker_col,
-        output_manifest, latent_dir, device,
+        output_manifest, latent_dir, device, codec_repo,
     ))
 
 
 def _run_manifest(
     data_source_mode, dataset, split, audio_col, text_col, speaker_col,
-    output_manifest, latent_dir, device,
+    output_manifest, latent_dir, device, codec_repo,
 ) -> tuple[str, str]:
     global _active_proc, _active_log_path
     cmd_list = _build_manifest_command(
         data_source_mode, dataset, split, audio_col, text_col, speaker_col,
-        output_manifest, latent_dir, device,
+        output_manifest, latent_dir, device, codec_repo,
     )
     cmd_str = " ".join(cmd_list)
     with _proc_lock:
@@ -2377,6 +2385,14 @@ def build_ui() -> gr.Blocks:
                         label="使用デバイス", choices=device_choices, value=default_model_device,
                     )
 
+                pm_codec_repo = gr.Dropdown(
+                    label="DACVAE codec",
+                    choices=PREPARE_CODEC_REPO_CHOICES,
+                    value=DEFAULT_PREPARE_CODEC_REPO,
+                    allow_custom_value=True,
+                    info="v2(dim32) default / switch to v1(dim128) as needed.",
+                )
+
                 def _on_pm_source_change(mode):
                     is_hf = mode == "HuggingFaceデータセット"
                     return (
@@ -2422,23 +2438,23 @@ def build_ui() -> gr.Blocks:
 
                 def _get_pm_inputs_values(mode, local_path, hf_name, split,
                                           audio_col, text_col, speaker_col,
-                                          output_manifest, latent_dir, device):
+                                          output_manifest, latent_dir, device, codec_repo):
                     src_mode = {"ローカルCSV": "local_csv",
                                 "ローカルJSONL": "local_jsonl",
                                 "HuggingFaceデータセット": "hf_dataset"}.get(mode, "local_csv")
                     dataset = hf_name if mode == "HuggingFaceデータセット" else local_path
-                    return src_mode, dataset, split, audio_col, text_col, speaker_col, output_manifest, latent_dir, device
+                    return src_mode, dataset, split, audio_col, text_col, speaker_col, output_manifest, latent_dir, device, codec_repo
 
                 _pm_all_inputs = [pm_data_source, pm_dataset, pm_hf_name, pm_split,
                                   pm_audio_col, pm_text_col, pm_speaker_col,
-                                  pm_output_manifest, pm_latent_dir, pm_device]
+                                  pm_output_manifest, pm_latent_dir, pm_device, pm_codec_repo]
 
                 def _update_pm_cmd(mode, local_path, hf_name, split,
                                    audio_col, text_col, speaker_col,
-                                   output_manifest, latent_dir, device):
+                                   output_manifest, latent_dir, device, codec_repo):
                     args = _get_pm_inputs_values(mode, local_path, hf_name, split,
                                                  audio_col, text_col, speaker_col,
-                                                 output_manifest, latent_dir, device)
+                                                 output_manifest, latent_dir, device, codec_repo)
                     return _manifest_cmd_preview(*args)
 
                 for comp in _pm_all_inputs:
@@ -2454,10 +2470,10 @@ def build_ui() -> gr.Blocks:
 
                 def _run_manifest_ui(mode, local_path, hf_name, split,
                                      audio_col, text_col, speaker_col,
-                                     output_manifest, latent_dir, device):
+                                     output_manifest, latent_dir, device, codec_repo):
                     args = _get_pm_inputs_values(mode, local_path, hf_name, split,
                                                  audio_col, text_col, speaker_col,
-                                                 output_manifest, latent_dir, device)
+                                                 output_manifest, latent_dir, device, codec_repo)
                     return _run_manifest(*args)
 
                 pm_run_btn.click(_run_manifest_ui, inputs=_pm_all_inputs,
@@ -2516,12 +2532,12 @@ def build_ui() -> gr.Blocks:
 
                 with gr.Accordion("🔁 ベースモデル・追加学習設定", open=True):
                     _default_safetensors = str(
-                        CHECKPOINTS_DIR / "Aratako_Irodori-TTS-500M" / "model.safetensors"
+                        CHECKPOINTS_DIR / "Aratako_Irodori-TTS-500M-v2" / "model.safetensors"
                     )
                     gr.Markdown(
                         "**--resume オプション設定**\n\n"
                         "- **オフ（スクラッチ学習）**: モデルを最初からランダム初期化して学習します。\n"
-                        "- **オン・パス未入力**: `checkpoints/Aratako_Irodori-TTS-500M/model.safetensors` が"
+                        "- **オン・パス未入力**: `checkpoints/Aratako_Irodori-TTS-500M-v2/model.safetensors` が"
                         "存在すれば自動でロードして追加学習します（デフォルト動作）。\n"
                         "- **オン・パス入力**: 指定したファイルをベースに追加学習します。"
                         "`.safetensors` を指定するとstep=0から学習開始、`.pt` チェックポイントを指定すると"
@@ -2872,8 +2888,8 @@ def build_ui() -> gr.Blocks:
                         label="ベースモデル (.pt / .safetensors)",
                         choices=initial_checkpoints,
                         value=(
-                            str(CHECKPOINTS_DIR / "Aratako_Irodori-TTS-500M" / "model.safetensors")
-                            if (CHECKPOINTS_DIR / "Aratako_Irodori-TTS-500M" / "model.safetensors").exists()
+                            str(CHECKPOINTS_DIR / "Aratako_Irodori-TTS-500M-v2" / "model.safetensors")
+                            if (CHECKPOINTS_DIR / "Aratako_Irodori-TTS-500M-v2" / "model.safetensors").exists()
                             else (initial_checkpoints[-1] if initial_checkpoints else None)
                         ),
                         allow_custom_value=True, scale=4,

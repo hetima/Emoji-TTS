@@ -6,6 +6,9 @@ from pathlib import Path
 
 import torch
 import torchaudio
+from huggingface_hub import hf_hub_download, list_repo_files
+
+_CODEC_DEFAULT = object()
 
 
 def patchify_latent(latent: torch.Tensor, patch_size: int) -> torch.Tensor:
@@ -40,6 +43,9 @@ class DACVAECodec:
     dtype: torch.dtype
     enable_watermark: bool
     watermark_alpha: float | None
+    deterministic_encode: bool
+    deterministic_decode: bool
+    normalize_db: float | None
 
     @classmethod
     def load(
@@ -49,6 +55,9 @@ class DACVAECodec:
         dtype: torch.dtype | None = None,
         enable_watermark: bool = False,
         watermark_alpha: float | None = None,
+        deterministic_encode: bool = True,
+        deterministic_decode: bool = True,
+        normalize_db: float | None = -16.0,
         local_dir: str | None = None,
     ) -> DACVAECodec:
         # Prefer installed package; fallback to local clone at ../dacvae.
@@ -60,21 +69,21 @@ class DACVAECodec:
                 sys.path.insert(0, str(local_repo))
             from dacvae import DACVAE
 
+        # Resolve location: local_dir download > hf:// prefix > weights.pth > repo_id passthrough
+        location = str(repo_id).strip()
+        if location.startswith("hf://"):
+            location = location[len("hf://"):]
+
         if local_dir is not None:
             # local_dirが指定されている場合:
-            # HuggingFace Hub から単一ファイルをlocal_dirにダウンロードし、
-            # そのファイルパスをDACVAE.loadに渡す。
-            # DACVAE.load()はrepo_idかtorch.package形式の.pthファイルパスを受け付ける。
-            from huggingface_hub import hf_hub_download, list_repo_files
+            # 指定repo専用ディレクトリに保存し、別repoの重み混在による取り違えを避ける。
             cache_dir = Path(local_dir)
             cache_dir.mkdir(parents=True, exist_ok=True)
 
-            # すでにダウンロード済みの.pthファイルを探す
-            existing = sorted(cache_dir.glob("*.pth"))
-            if existing:
-                model_path = str(existing[0])
+            preferred = cache_dir / "weights.pth"
+            if preferred.exists():
+                location = str(preferred)
             else:
-                # リポジトリ内の.pthファイルを探してダウンロード
                 try:
                     repo_files = list(list_repo_files(repo_id))
                     pth_files = [f for f in repo_files if f.endswith(".pth")]
@@ -84,37 +93,31 @@ class DACVAECodec:
                 if pth_files:
                     filename = pth_files[0]
                 else:
-                    # フォールバック: repo_idをそのままDACVAE.loadに渡す
-                    model = DACVAE.load(repo_id).eval().to(device)
-                    return cls._finalize(
-                        model=model, device=device, dtype=dtype,
-                        enable_watermark=enable_watermark, watermark_alpha=watermark_alpha,
+                    filename = "weights.pth"
+
+                try:
+                    location = hf_hub_download(
+                        repo_id=repo_id,
+                        filename=filename,
+                        local_dir=str(cache_dir),
                     )
+                    print(f"[codec] dacvae: hf://{repo_id}/{filename} -> {location}", flush=True)
+                except Exception:
+                    existing = sorted(cache_dir.glob("*.pth"))
+                    if existing:
+                        location = str(existing[0])
+                    else:
+                        # ダウンロード失敗時はrepo_idをそのままDACVAE.loadに渡す
+                        location = repo_id
+        elif not Path(location).exists() and "/" in location and not location.endswith(".pth"):
+            # hf://なしのrepo_id形式: weights.pthを自動ダウンロード試行
+            try:
+                location = hf_hub_download(repo_id=location, filename="weights.pth")
+                print(f"[codec] dacvae: hf://{repo_id} -> {location}", flush=True)
+            except Exception:
+                pass
 
-                model_path = hf_hub_download(
-                    repo_id=repo_id,
-                    filename=filename,
-                    local_dir=str(cache_dir),
-                )
-            model = DACVAE.load(model_path).eval().to(device)
-        else:
-            model = DACVAE.load(repo_id).eval().to(device)
-
-        return cls._finalize(
-            model=model, device=device, dtype=dtype,
-            enable_watermark=enable_watermark, watermark_alpha=watermark_alpha,
-        )
-
-    @classmethod
-    def _finalize(
-        cls,
-        *,
-        model: torch.nn.Module,
-        device: str,
-        dtype: torch.dtype | None,
-        enable_watermark: bool,
-        watermark_alpha: float | None,
-    ) -> "DACVAECodec":
+        model = DACVAE.load(location).eval().to(device)
         if dtype is not None:
             model = model.to(dtype=dtype)
 
@@ -144,6 +147,9 @@ class DACVAECodec:
 
                 decoder.watermark = _watermark_passthrough
 
+        if deterministic_decode:
+            cls._configure_deterministic_decode(model=model, device=device)
+
         model_dtype = next(model.parameters()).dtype
         # Infer latent dimension by encoding a tiny random signal.
         dummy = torch.zeros(1, 1, 2048, device=device, dtype=model_dtype)
@@ -157,13 +163,84 @@ class DACVAECodec:
             dtype=model_dtype,
             enable_watermark=configured_enable_watermark,
             watermark_alpha=configured_watermark_alpha,
+            deterministic_encode=bool(deterministic_encode),
+            deterministic_decode=bool(deterministic_decode),
+            normalize_db=None if normalize_db is None else float(normalize_db),
         )
 
+    @staticmethod
+    def _configure_deterministic_decode(model: torch.nn.Module, device: str | torch.device) -> None:
+        decoder = getattr(model, "decoder", None)
+        wm_model = getattr(decoder, "wm_model", None)
+        msg_processor = getattr(wm_model, "msg_processor", None)
+        if msg_processor is None:
+            return
+        nbits = int(msg_processor.nbits)
+        message_device = torch.device(device)
+
+        def _fixed_message(batch_size: int) -> torch.Tensor:
+            return torch.zeros((batch_size, nbits), dtype=torch.float32, device=message_device)
+
+        wm_model.random_message = _fixed_message
+
+    @staticmethod
+    def _normalize_loudness(
+        wav: torch.Tensor, sample_rate: int, target_db: float | None
+    ) -> torch.Tensor:
+        if target_db is None:
+            return wav
+        wav_device = wav.device
+        wav = wav.to(dtype=torch.float32)
+        if wav.ndim == 2:
+            if wav.shape[0] == 1:
+                wav = wav[0]
+            elif wav.shape[1] == 1:
+                wav = wav[:, 0]
+            else:
+                wav = wav.mean(dim=0)
+        if wav.ndim != 1:
+            raise ValueError(
+                "normalize_loudness expects a mono waveform with shape (T,) "
+                f"or singleton-channel (1, T)/(T, 1), got {tuple(wav.shape)}"
+            )
+
+        try:
+            from audiotools import AudioSignal
+        except Exception as exc:
+            raise RuntimeError(
+                "audiotools is required when normalize_db is set. "
+                "Install audiotools or disable normalize_db."
+            ) from exc
+
+        signal = AudioSignal(wav.unsqueeze(0).unsqueeze(0), int(sample_rate))
+        signal.normalize(float(target_db))
+        signal.ensure_max_of_audio()
+        normalized = signal.audio_data
+        if not isinstance(normalized, torch.Tensor):
+            normalized = torch.as_tensor(normalized)
+        normalized = normalized.to(dtype=torch.float32, device=wav_device)
+        normalized = normalized.squeeze()
+        if normalized.ndim != 1:
+            raise RuntimeError(
+                "audiotools normalization returned an unexpected waveform shape "
+                f"{tuple(normalized.shape)}"
+            )
+        return normalized
+
     @torch.inference_mode()
-    def encode_waveform(self, waveform: torch.Tensor, sample_rate: int) -> torch.Tensor:
+    def encode_waveform(
+        self,
+        waveform: torch.Tensor,
+        sample_rate: int,
+        *,
+        normalize_db: float | None | object = _CODEC_DEFAULT,
+        ensure_max: bool | None = None,
+    ) -> torch.Tensor:
         """
         Input:
           waveform: (B, C, T) or (C, T)
+          normalize_db: Optional target loudness (LUFS-like dB) applied before encode
+          ensure_max: If True and normalize_db is None, scale down only when abs peak exceeds 1.0
         Output:
           latent: (B, T_latent, D_latent)
         """
@@ -177,8 +254,54 @@ class DACVAECodec:
         if sample_rate != self.sample_rate:
             waveform = torchaudio.functional.resample(waveform, sample_rate, self.sample_rate)
 
+        if normalize_db is _CODEC_DEFAULT:
+            effective_normalize_db = self.normalize_db
+        elif normalize_db is None:
+            effective_normalize_db = None
+        else:
+            effective_normalize_db = float(normalize_db)
+        effective_ensure_max = (
+            effective_normalize_db is None and bool(ensure_max) if ensure_max is not None else False
+        )
+
+        waveform = waveform.to(dtype=torch.float32)
+        if effective_normalize_db is not None or effective_ensure_max:
+            processed: list[torch.Tensor] = []
+            for wav in waveform.squeeze(1):
+                if effective_normalize_db is not None:
+                    wav = self._normalize_loudness(
+                        wav, sample_rate=self.sample_rate, target_db=effective_normalize_db
+                    )
+                wav = wav.squeeze()
+                if wav.ndim != 1:
+                    raise RuntimeError(
+                        "Expected mono per-item waveform after preprocessing, "
+                        f"got shape={tuple(wav.shape)}"
+                    )
+                if effective_ensure_max:
+                    peak = wav.abs().max()
+                    if torch.isfinite(peak) and peak > 1.0:
+                        wav = wav * (1.0 / float(peak))
+                processed.append(wav)
+            waveform = torch.stack(processed, dim=0).unsqueeze(1)
+
         waveform = waveform.to(self.device, dtype=self.dtype)
-        encoded = self.model.encode(waveform)  # (B, D, T)
+        if self.deterministic_encode:
+            required_paths_present = (
+                hasattr(self.model, "encoder")
+                and hasattr(self.model, "_pad")
+                and hasattr(self.model, "quantizer")
+                and hasattr(self.model.quantizer, "in_proj")
+            )
+            if not required_paths_present:
+                raise RuntimeError(
+                    "deterministic_encode=True requires encoder/_pad/quantizer.in_proj on DACVAE model."
+                )
+            z = self.model.encoder(self.model._pad(waveform))
+            mean, _scale = self.model.quantizer.in_proj(z).chunk(2, dim=1)
+            encoded = mean
+        else:
+            encoded = self.model.encode(waveform)  # (B, D, T)
         return encoded.transpose(1, 2).contiguous()  # (B, T, D)
 
     @torch.inference_mode()

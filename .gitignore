@@ -3,6 +3,7 @@
 
 # python
 __pycache__/
+.uv_cache/
 *.pyc
 
 # models

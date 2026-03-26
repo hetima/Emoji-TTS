@@ -45,6 +45,9 @@ from irodori_tts.tokenizer import PretrainedTextTokenizer
 from train import (
     EMAModel,
     EarlyStopping,
+    SAFETENSORS_CONFIG_META_KEY,
+    _check_model_config_compatibility,
+    _load_model_state_from_checkpoint,
     apply_attention_backend,
     apply_gradient_checkpointing,
     build_text_tokenizer,
@@ -227,34 +230,27 @@ def _load_base_model(base_model_path: str, device: torch.device) -> tuple[TextTo
     if not p.is_file():
         raise FileNotFoundError(f"Base model not found: {base_model_path}")
 
-    if p.suffix.lower() == ".safetensors":
-        from safetensors.torch import load_file
-        from safetensors import safe_open
-        weights = load_file(str(p), device="cpu")
-        with safe_open(str(p), framework="pt", device="cpu") as handle:
-            metadata = handle.metadata() or {}
-        cfg_json = metadata.get("config_json")
-        if cfg_json is None:
-            raise ValueError(f"Safetensors file has no 'config_json' metadata: {p}")
-        flat_cfg = json.loads(cfg_json)
-        # inference config keys を除外してモデル設定を取得
-        _INF_KEYS = {"max_text_len", "fixed_target_latent_steps"}
-        model_cfg_dict = {k: v for k, v in flat_cfg.items() if k not in _INF_KEYS}
-        model_cfg = ModelConfig(**model_cfg_dict)
-        model = TextToLatentRFDiT(model_cfg).to(device)
-        missing, unexpected = model.load_state_dict(weights, strict=False)
-        if missing:
-            print(f"  Base model missing keys: {len(missing)}")
-        if unexpected:
-            print(f"  Base model unexpected keys: {len(unexpected)}")
-    else:
-        ckpt = torch.load(str(p), map_location=device, weights_only=True)
-        model_cfg_dict = ckpt.get("model_config")
-        if not isinstance(model_cfg_dict, dict):
-            raise ValueError(f"Checkpoint missing model_config: {p}")
-        model_cfg = ModelConfig(**model_cfg_dict)
-        model = TextToLatentRFDiT(model_cfg).to(device)
-        model.load_state_dict(ckpt["model"])
+    # train.py の共通関数でモデル重みと設定を読み込む
+    model_state, checkpoint_model_cfg = _load_model_state_from_checkpoint(p)
+
+    if checkpoint_model_cfg is None:
+        raise ValueError(
+            f"Checkpoint has no model config metadata. "
+            f"Safetensors files require '{SAFETENSORS_CONFIG_META_KEY}' metadata, "
+            f".pt files require 'model_config' key: {p}"
+        )
+
+    # inference config keys を除外してモデル設定を取得
+    _INF_KEYS = {"max_text_len", "fixed_target_latent_steps"}
+    model_cfg_dict = {k: v for k, v in checkpoint_model_cfg.items() if k not in _INF_KEYS}
+    model_cfg = ModelConfig(**model_cfg_dict)
+
+    model = TextToLatentRFDiT(model_cfg).to(device)
+    missing, unexpected = model.load_state_dict(model_state, strict=False)
+    if missing:
+        print(f"  Base model missing keys: {len(missing)}")
+    if unexpected:
+        print(f"  Base model unexpected keys: {len(unexpected)}")
 
     return model, model_cfg_dict
 
@@ -444,6 +440,7 @@ def main() -> None:
     full_dataset = LatentTextDataset(
         manifest_path=args.manifest,
         latent_dim=model_cfg.latent_dim,
+        latent_patch_size=model_cfg.latent_patch_size,
         max_latent_steps=args.max_latent_steps,
     )
 
@@ -458,12 +455,14 @@ def main() -> None:
         train_dataset = LatentTextDataset(
             manifest_path=args.manifest,
             latent_dim=model_cfg.latent_dim,
+            latent_patch_size=model_cfg.latent_patch_size,
             max_latent_steps=args.max_latent_steps,
             subset_indices=train_indices,
         )
         valid_dataset = LatentTextDataset(
             manifest_path=args.manifest,
             latent_dim=model_cfg.latent_dim,
+            latent_patch_size=model_cfg.latent_patch_size,
             max_latent_steps=args.max_latent_steps,
             subset_indices=valid_indices,
         )
