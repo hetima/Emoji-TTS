@@ -155,16 +155,44 @@ def _run_create_speaker(
     if not wav_path or not Path(wav_path).is_file():
         return "エラー: WAVファイルを選択してください。"
 
-    # 既存のキャッシュ済み runtime から codec を流用
+    # ガードレール: キャッシュ済み runtime のキーと一致するか検証し
+    # 一致しない場合は再ロードを行わずエラーを返す。
+    # （codec_repo は推論タブのデフォルト値に固定されているため、
+    #   異なる checkpoint / device / precision でモデルをロードしている場合に
+    #   無駄なモデル全体の再ロードが発生するのを防ぐ。）
+    from irodori_tts.inference_runtime import _RUNTIME_CACHE_KEY, _RUNTIME_CACHE_VALUE  # noqa: PLC0415
     try:
         runtime_key = _build_runtime_key(
             checkpoint, model_device, model_precision,
             codec_device, codec_precision, False, "（なし）",
         )
-        runtime, _ = get_cached_runtime(runtime_key)
-        codec = runtime.codec
     except Exception as e:
-        return f"エラー: モデルを先に「モデル読み込み」ボタンで読み込んでください。\n{e}"
+        return f"エラー: チェックポイントパスが無効です。\n{e}"
+
+    # キャッシュキーとの比較（lora_path は codec には無関係なので無視して比較）
+    _cached_key = _RUNTIME_CACHE_KEY
+    _cached_runtime = _RUNTIME_CACHE_VALUE
+    if _cached_runtime is None:
+        return (
+            "エラー: モデルが読み込まれていません。\n"
+            "先に「📥 モデル読み込み」ボタンを押してください。"
+        )
+
+    # codec に関係するフィールドのみ比較
+    _codec_fields = ("checkpoint", "model_device", "codec_repo", "model_precision",
+                     "codec_device", "codec_precision", "enable_watermark")
+    _key_mismatch = any(
+        getattr(_cached_key, f, None) != getattr(runtime_key, f, None)
+        for f in _codec_fields
+    )
+    if _key_mismatch:
+        return (
+            "エラー: 現在読み込み中のモデル設定（チェックポイント・デバイス・精度）と\n"
+            "スピーカー登録パネルの設定が一致しません。\n"
+            "推論タブの設定と一致させてから「📥 モデル読み込み」を実行してください。"
+        )
+
+    codec = _cached_runtime.codec
 
     try:
         wav, sr = torchaudio.load(wav_path)
@@ -453,7 +481,7 @@ def _resolve_checkpoint_path_infer(raw_checkpoint: str) -> str:
         return checkpoint
     raise ValueError(f"サポートされていないファイル形式: {suffix}")
 
-def _build_runtime_key(checkpoint, model_device, model_precision, codec_device, codec_precision, enable_watermark, lora_adapter="（なし）"):
+def _build_runtime_key(checkpoint, model_device, model_precision, codec_device, codec_precision, enable_watermark, lora_adapter="（なし）", codec_repo="Aratako/Semantic-DACVAE-Japanese-32dim"):
     checkpoint_path = _resolve_checkpoint_path_infer(checkpoint)
     lora_path = None
     if str(lora_adapter).strip() and str(lora_adapter).strip() != "（なし）":
@@ -463,7 +491,7 @@ def _build_runtime_key(checkpoint, model_device, model_precision, codec_device, 
     return RuntimeKey(
         checkpoint=checkpoint_path,
         model_device=str(model_device),
-        codec_repo="Aratako/Semantic-DACVAE-Japanese-32dim",
+        codec_repo=str(codec_repo),
         model_precision=str(model_precision),
         codec_device=str(codec_device),
         codec_precision=str(codec_precision),
@@ -494,7 +522,7 @@ def _clear_runtime_cache() -> str:
 
 def _run_generation(
     checkpoint, model_device, model_precision, codec_device, codec_precision, enable_watermark,
-    lora_adapter, lora_scale,
+    lora_adapter, lora_scale, lora_disabled_modules_raw,
     text, uploaded_audio, spk_ref_latent_path,
     num_steps, seed_raw, cfg_guidance_mode, cfg_scale_text, cfg_scale_speaker,
     cfg_scale_raw, cfg_min_t, cfg_max_t, context_kv_cache,
@@ -517,6 +545,13 @@ def _run_generation(
     speaker_kv_min_t = _parse_optional_float(speaker_kv_min_t_raw, "speaker_kv_min_t")
     speaker_kv_max_layers = _parse_optional_int(speaker_kv_max_layers_raw, "speaker_kv_max_layers")
     seed = _parse_optional_int(seed_raw, "seed")
+
+    # lora_disabled_modules: カンマ区切り文字列 → tuple[str, ...]
+    _disabled_raw = str(lora_disabled_modules_raw).strip() if lora_disabled_modules_raw else ""
+    lora_disabled_modules: tuple[str, ...] = (
+        tuple(m.strip() for m in _disabled_raw.split(",") if m.strip())
+        if _disabled_raw else ()
+    )
 
     # 参照音声の優先順位: スピーカーライブラリ > 直接アップロード > no-reference
     _spk_pt = str(spk_ref_latent_path).strip() if spk_ref_latent_path else ""
@@ -565,6 +600,7 @@ def _run_generation(
                 speaker_kv_scale=speaker_kv_scale, speaker_kv_min_t=speaker_kv_min_t,
                 speaker_kv_max_layers=speaker_kv_max_layers, trim_tail=True,
                 lora_scale=float(lora_scale) if runtime_key.lora_path else 1.0,
+                lora_disabled_modules=lora_disabled_modules if runtime_key.lora_path else (),
             ),
             log_fn=stdout_log,
         )
@@ -1913,6 +1949,13 @@ def build_ui() -> gr.Blocks:
                     label="LoRAスケール（0.0=LoRA無効 / 1.0=通常 / >1.0=強調）",
                     minimum=0.0, maximum=2.0, value=1.0, step=0.05, visible=False,
                 )
+                infer_lora_disabled_modules = gr.Textbox(
+                    label="LoRA無効モジュール（カンマ区切り、空=全て有効）",
+                    value="",
+                    placeholder="例: blocks.0.attention, blocks.1.attention",
+                    visible=False,
+                    info="指定したモジュールのLoRAをスケール0で無効化します。",
+                )
 
                 with gr.Row():
                     model_device = gr.Dropdown(label="モデルデバイス", choices=device_choices, value=default_model_device, scale=1)
@@ -2295,8 +2338,12 @@ def build_ui() -> gr.Blocks:
                     outputs=[infer_lora_adapter],
                 )
                 infer_lora_adapter.change(
-                    lambda v: gr.Slider(visible=(str(v).strip() not in ("", "（なし）"))),
-                    inputs=[infer_lora_adapter], outputs=[infer_lora_scale],
+                    lambda v: (
+                        gr.Slider(visible=(str(v).strip() not in ("", "（なし）"))),
+                        gr.Textbox(visible=(str(v).strip() not in ("", "（なし）"))),
+                    ),
+                    inputs=[infer_lora_adapter],
+                    outputs=[infer_lora_scale, infer_lora_disabled_modules],
                 )
                 model_device.change(_on_model_device_change, inputs=[model_device], outputs=[model_precision])
                 codec_device.change(_on_codec_device_change, inputs=[codec_device], outputs=[codec_precision])
@@ -2308,7 +2355,7 @@ def build_ui() -> gr.Blocks:
                 generate_btn.click(_run_generation_ui,
                     inputs=[
                         infer_checkpoint, model_device, model_precision, codec_device, codec_precision, enable_watermark,
-                        infer_lora_adapter, infer_lora_scale,
+                        infer_lora_adapter, infer_lora_scale, infer_lora_disabled_modules,
                         infer_text, infer_audio, spk_ref_latent_path,
                         num_steps, seed_raw, cfg_guidance_mode,
                         cfg_scale_text, cfg_scale_speaker, cfg_scale_raw, cfg_min_t, cfg_max_t,

@@ -166,6 +166,22 @@ def main() -> None:
     )
     parser.add_argument("--codec-repo", default="facebook/dacvae-watermarked")
     parser.add_argument(
+        "--lora-path",
+        default=None,
+        help="LoRAアダプタフォルダパス (adapter_config.json を含むディレクトリ)。省略時はベースモデルのみ使用。",
+    )
+    parser.add_argument(
+        "--lora-scale",
+        type=float,
+        default=1.0,
+        help="LoRAスケール (0.0=無効 / 1.0=標準 / >1.0=強調)。デフォルト: 1.0。",
+    )
+    parser.add_argument(
+        "--lora-disabled-modules",
+        default="",
+        help="LoRAを無効にするモジュール名のカンマ区切りリスト (例: blocks.0.attention)。省略時は全モジュール有効。",
+    )
+    parser.add_argument(
         "--max-text-len",
         type=int,
         default=None,
@@ -333,6 +349,21 @@ def main() -> None:
 
     checkpoint_path = _resolve_checkpoint_path(args)
 
+    # LoRAアダプタパスの検証
+    lora_path: str | None = None
+    if args.lora_path is not None:
+        from pathlib import Path as _Path
+        _lp = _Path(str(args.lora_path))
+        if not _lp.is_dir():
+            raise FileNotFoundError(f"LoRAアダプタフォルダが見つかりません: {_lp}")
+        if not (_lp / "adapter_config.json").exists():
+            raise FileNotFoundError(
+                f"adapter_config.json が見つかりません: {_lp / 'adapter_config.json'}"
+            )
+        lora_path = str(_lp)
+        print(f"[lora] adapter: {lora_path}", flush=True)
+        print(f"[lora] scale: {args.lora_scale}", flush=True)
+
     runtime = InferenceRuntime.from_key(
         RuntimeKey(
             checkpoint=checkpoint_path,
@@ -346,7 +377,15 @@ def main() -> None:
             enable_watermark=bool(args.enable_watermark),
             compile_model=bool(args.compile_model),
             compile_dynamic=bool(args.compile_dynamic),
+            lora_path=lora_path,
         )
+    )
+
+    # lora_disabled_modules: カンマ区切り文字列 → tuple[str, ...]
+    _lora_disabled_raw = str(args.lora_disabled_modules).strip()
+    lora_disabled_modules: tuple[str, ...] = (
+        tuple(m.strip() for m in _lora_disabled_raw.split(",") if m.strip())
+        if _lora_disabled_raw else ()
     )
 
     result = runtime.synthesize(
@@ -391,6 +430,8 @@ def main() -> None:
             tail_window_size=int(args.tail_window_size),
             tail_std_threshold=float(args.tail_std_threshold),
             tail_mean_threshold=float(args.tail_mean_threshold),
+            lora_scale=float(args.lora_scale),
+            lora_disabled_modules=lora_disabled_modules,
         ),
         log_fn=None,
     )

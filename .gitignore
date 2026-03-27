@@ -5,6 +5,7 @@
 __pycache__/
 .uv_cache/
 *.pyc
+uv.lock
 
 # models
 *.pt

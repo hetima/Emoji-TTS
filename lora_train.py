@@ -723,7 +723,7 @@ def main() -> None:
                 accum_loss.zero_()
 
                 torch.nn.utils.clip_grad_norm_(
-                    model.parameters(),
+                    trainable_params,
                     clip_grad_norm if clip_grad_norm > 0 else float("inf"),
                 )
                 optimizer.step()
