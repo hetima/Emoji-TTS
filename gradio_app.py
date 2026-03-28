@@ -106,10 +106,14 @@ def _scan_train_checkpoints() -> list[str]:
 
 
 def _scan_lora_adapters() -> list[str]:
+    """adapter_config.json と adapter_model.safetensors/.bin の両方が存在するフォルダを列挙。"""
     LORA_DIR.mkdir(parents=True, exist_ok=True)
+    _ADAPTER_STATES = ("adapter_model.safetensors", "adapter_model.bin")
     result = []
     for p in sorted(LORA_DIR.rglob("adapter_config.json")):
-        result.append(str(p.parent))
+        parent = p.parent
+        if any((parent / s).is_file() for s in _ADAPTER_STATES):
+            result.append(str(parent))
     return result
 
 
@@ -155,44 +159,48 @@ def _run_create_speaker(
     if not wav_path or not Path(wav_path).is_file():
         return "エラー: WAVファイルを選択してください。"
 
-    # ガードレール: キャッシュ済み runtime のキーと一致するか検証し
-    # 一致しない場合は再ロードを行わずエラーを返す。
-    # （codec_repo は推論タブのデフォルト値に固定されているため、
-    #   異なる checkpoint / device / precision でモデルをロードしている場合に
-    #   無駄なモデル全体の再ロードが発生するのを防ぐ。）
-    from irodori_tts.inference_runtime import _RUNTIME_CACHE_KEY, _RUNTIME_CACHE_VALUE  # noqa: PLC0415
-    try:
-        runtime_key = _build_runtime_key(
-            checkpoint, model_device, model_precision,
-            codec_device, codec_precision, False, "（なし）",
-        )
-    except Exception as e:
-        return f"エラー: チェックポイントパスが無効です。\n{e}"
-
-    # キャッシュキーとの比較（lora_path は codec には無関係なので無視して比較）
-    _cached_key = _RUNTIME_CACHE_KEY
+    # ── ガードレール: キャッシュ済み runtime を直接使用 ──────────────
+    # get_cached_runtime() による暗黙の再ロードを防止する。
+    # キャッシュ未ロードの場合はエラーを返す。
+    # キャッシュ済みの場合は codec_repo も含めてそのまま流用する。
+    from irodori_tts.inference_runtime import _RUNTIME_CACHE_KEY, _RUNTIME_CACHE_VALUE
     _cached_runtime = _RUNTIME_CACHE_VALUE
+    _cached_key = _RUNTIME_CACHE_KEY
+
     if _cached_runtime is None:
         return (
             "エラー: モデルが読み込まれていません。\n"
             "先に「📥 モデル読み込み」ボタンを押してください。"
         )
 
-    # codec に関係するフィールドのみ比較
+    # checkpoint / device / precision の一致確認（codec_repo はキャッシュから自動使用）
+    try:
+        runtime_key = _build_runtime_key(
+            checkpoint, model_device, model_precision,
+            codec_device, codec_precision, False, "（なし）",
+            codec_repo=_cached_key.codec_repo,
+        )
+    except Exception as e:
+        return f"エラー: チェックポイントパスが無効です。\n{e}"
+
     _codec_fields = ("checkpoint", "model_device", "codec_repo", "model_precision",
                      "codec_device", "codec_precision", "enable_watermark")
-    _key_mismatch = any(
-        getattr(_cached_key, f, None) != getattr(runtime_key, f, None)
-        for f in _codec_fields
-    )
-    if _key_mismatch:
+    _mismatch = [
+        f for f in _codec_fields
+        if getattr(_cached_key, f, None) != getattr(runtime_key, f, None)
+    ]
+    if _mismatch:
         return (
-            "エラー: 現在読み込み中のモデル設定（チェックポイント・デバイス・精度）と\n"
-            "スピーカー登録パネルの設定が一致しません。\n"
+            f"エラー: 現在読み込み中のモデル設定と登録パネルの設定が一致しません。\n"
+            f"不一致フィールド: {', '.join(_mismatch)}\n"
             "推論タブの設定と一致させてから「📥 モデル読み込み」を実行してください。"
         )
 
     codec = _cached_runtime.codec
+
+    # モデルバージョン情報を取得してログに含める
+    ldim = int(_cached_runtime.model_cfg.latent_dim)
+    version_label = "v2" if ldim == 32 else ("v1" if ldim == 128 else f"unknown(dim={ldim})")
 
     try:
         wav, sr = torchaudio.load(wav_path)
@@ -238,7 +246,8 @@ def _run_create_speaker(
 
     msg = f"✅ 登録完了: speakers/{char_name}/\n"
     msg += f"  ref.wav / ref.pt / profile.json\n"
-    msg += f"  潜在 shape: {tuple(latent.shape)}  ({duration_sec}秒)"
+    msg += f"  潜在 shape: {tuple(latent.shape)}  ({duration_sec}秒)\n"
+    msg += f"  使用モデル: {version_label} (latent_dim={ldim}, codec={_cached_key.codec_repo})"
     if trimmed:
         msg += "\n  （30秒にトリム済み）"
     return msg
@@ -386,6 +395,95 @@ def _save_lora_preset(name: str, *cfg_args):
 # 以降は元のコードと同じ（_ensure_default_model から build_ui まで）
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _detect_model_version_from_runtime() -> tuple[str, str, int] | None:
+    """キャッシュ済み runtime からモデルバージョン情報を取得する。
+    戻り値: (version_label, codec_repo, latent_dim) または None"""
+    from irodori_tts.inference_runtime import _RUNTIME_CACHE_VALUE
+    runtime = _RUNTIME_CACHE_VALUE
+    if runtime is None:
+        return None
+    ldim = int(runtime.model_cfg.latent_dim)
+    version = "v2" if ldim == 32 else ("v1" if ldim == 128 else f"unknown(dim={ldim})")
+    return version, runtime.key.codec_repo, ldim
+
+
+def _codec_repo_for_latent_dim(latent_dim: int) -> str:
+    """latent_dim からデフォルト codec_repo を返す。"""
+    if latent_dim == 32:
+        return "Aratako/Semantic-DACVAE-Japanese-32dim"
+    return "facebook/dacvae-watermarked"
+
+
+def _validate_lora_compat_ui(lora_adapter: str) -> str:
+    """
+    LoRAアダプタとロード済みモデルの互換性をUIから検証する。
+    戻り値: 状態メッセージ文字列（エラー時は ❌ プレフィックス）
+    """
+    import json as _json
+    if not lora_adapter or lora_adapter.strip() in ("", "（なし）"):
+        return ""
+
+    lp = Path(lora_adapter.strip())
+    if not lp.is_dir():
+        return f"❌ フォルダが存在しません: {lp}"
+
+    adapter_config_path = lp / "adapter_config.json"
+    if not adapter_config_path.is_file():
+        return "❌ adapter_config.json が見つかりません。"
+
+    _ADAPTER_STATES = ("adapter_model.safetensors", "adapter_model.bin")
+    if not any((lp / s).is_file() for s in _ADAPTER_STATES):
+        return "❌ adapter_model.safetensors / adapter_model.bin が見つかりません。"
+
+    # 本家版 vs フォーク版の識別
+    try:
+        adapter_cfg = _json.loads(adapter_config_path.read_text(encoding="utf-8"))
+    except Exception as e:
+        return f"❌ adapter_config.json の読み込みに失敗: {e}"
+
+    has_metadata = (lp / "irodori_lora_metadata.json").is_file()
+    target_modules = adapter_cfg.get("target_modules")
+    is_upstream = has_metadata or (
+        isinstance(target_modules, str) and target_modules.startswith("^")
+    )
+    origin_label = "本家版" if is_upstream else "フォーク版"
+
+    # ロード済みモデルとの latent_dim 照合
+    info = _detect_model_version_from_runtime()
+    if info is None:
+        return f"⚠️ {origin_label}アダプタ検出。モデル未読み込みのため latent_dim 照合をスキップ。"
+
+    version_label, _, ldim = info
+    adapter_st_path = lp / "adapter_model.safetensors"
+    if adapter_st_path.is_file():
+        try:
+            from safetensors import safe_open as _safe_open
+            from irodori_tts.inference_runtime import _RUNTIME_CACHE_VALUE
+            runtime = _RUNTIME_CACHE_VALUE
+            expected_patched = ldim * int(runtime.model_cfg.latent_patch_size)
+
+            with _safe_open(str(adapter_st_path), framework="pt", device="cpu") as _h:
+                all_keys = list(_h.keys())
+            in_proj_key = next(
+                (k for k in all_keys if "in_proj" in k and "lora_A" in k), None
+            )
+            if in_proj_key is not None:
+                with _safe_open(str(adapter_st_path), framework="pt", device="cpu") as _h:
+                    t = _h.get_tensor(in_proj_key)
+                adapter_in = int(t.shape[1])
+                if adapter_in != expected_patched:
+                    return (
+                        f"❌ 互換性エラー ({origin_label}): "
+                        f"アダプタ in_features={adapter_in} ≠ "
+                        f"モデル patched_latent_dim={expected_patched}。"
+                        f"このLoRAはモデル {version_label} と非互換です。"
+                    )
+        except Exception as e:
+            return f"⚠️ {origin_label}アダプタ / shape 検証スキップ: {e}"
+
+    return f"✅ {origin_label}アダプタ ({version_label} モデルと互換)"
+
+
 def _ensure_default_model() -> None:
     if _scan_checkpoints():
         return
@@ -481,6 +579,30 @@ def _resolve_checkpoint_path_infer(raw_checkpoint: str) -> str:
         return checkpoint
     raise ValueError(f"サポートされていないファイル形式: {suffix}")
 
+def _peek_latent_dim_from_checkpoint(checkpoint_path: str) -> int | None:
+    """チェックポイントを軽量に読み取りlatent_dimを返す。失敗時はNone。"""
+    try:
+        from pathlib import Path as _Path
+        import json as _json
+        p = _Path(checkpoint_path)
+        if p.suffix.lower() == ".safetensors":
+            from safetensors import safe_open as _safe_open
+            with _safe_open(str(p), framework="pt", device="cpu") as h:
+                meta = h.metadata() or {}
+            cfg_raw = meta.get("config_json")
+            if cfg_raw:
+                cfg = _json.loads(cfg_raw)
+                return int(cfg["latent_dim"])
+        else:
+            import torch as _torch
+            ckpt = _torch.load(str(p), map_location="cpu", weights_only=True)
+            model_cfg = ckpt.get("model_config", {})
+            if "latent_dim" in model_cfg:
+                return int(model_cfg["latent_dim"])
+    except Exception:
+        pass
+    return None
+
 def _build_runtime_key(checkpoint, model_device, model_precision, codec_device, codec_precision, enable_watermark, lora_adapter="（なし）", codec_repo="Aratako/Semantic-DACVAE-Japanese-32dim"):
     checkpoint_path = _resolve_checkpoint_path_infer(checkpoint)
     lora_path = None
@@ -503,18 +625,36 @@ def _build_runtime_key(checkpoint, model_device, model_precision, codec_device, 
         lora_path=lora_path,
     )
 
-def _load_model(checkpoint, model_device, model_precision, codec_device, codec_precision, enable_watermark, lora_adapter="（なし）") -> str:
-    runtime_key = _build_runtime_key(checkpoint, model_device, model_precision, codec_device, codec_precision, enable_watermark, lora_adapter)
+def _load_model(checkpoint, model_device, model_precision, codec_device, codec_precision, enable_watermark, lora_adapter="（なし）") -> tuple[str, str]:
+    """モデルをロードしてステータスと自動選択された codec_repo を返す。"""
+    # ロード前にlatent_dimを先読みして正しいcodec_repoを決定する
+    _raw_cp = _resolve_checkpoint_path_infer(str(checkpoint).strip())
+    _ldim_pre = _peek_latent_dim_from_checkpoint(_raw_cp)
+    _initial_codec_repo = _codec_repo_for_latent_dim(_ldim_pre) if _ldim_pre is not None else "Aratako/Semantic-DACVAE-Japanese-32dim"
+    runtime_key = _build_runtime_key(checkpoint, model_device, model_precision, codec_device, codec_precision, enable_watermark, lora_adapter, codec_repo=_initial_codec_repo)
     _, reloaded = get_cached_runtime(runtime_key)
     status = "モデルを読み込みました" if reloaded else "モデルは既にロード済みです（再利用）"
-    lora_info = f"\nlora: {runtime_key.lora_path}" if runtime_key.lora_path else ""
-    return (
+
+    # ロード済みモデルからバージョン情報を取得
+    info = _detect_model_version_from_runtime()
+    version_str = ""
+    auto_codec_repo = runtime_key.codec_repo
+    if info is not None:
+        version_label, codec_repo_used, ldim = info
+        version_str = f"\nモデルバージョン: {version_label} (latent_dim={ldim})"
+        auto_codec_repo = codec_repo_used
+
+    lora_info = f"\nLoRAアダプタ: {runtime_key.lora_path}" if runtime_key.lora_path else ""
+    status_text = (
         f"{status}\n"
-        f"checkpoint: {runtime_key.checkpoint}\n"
+        f"checkpoint: {runtime_key.checkpoint}"
+        f"{version_str}\n"
         f"model_device: {runtime_key.model_device} / {runtime_key.model_precision}\n"
-        f"codec_device: {runtime_key.codec_device} / {runtime_key.codec_precision}"
+        f"codec_device: {runtime_key.codec_device} / {runtime_key.codec_precision}\n"
+        f"codec_repo: {auto_codec_repo}"
         f"{lora_info}"
     )
+    return status_text, auto_codec_repo
 
 def _clear_runtime_cache() -> str:
     clear_cached_runtime()
@@ -533,7 +673,17 @@ def _run_generation(
     def stdout_log(msg: str) -> None:
         print(msg, flush=True)
 
-    runtime_key = _build_runtime_key(checkpoint, model_device, model_precision, codec_device, codec_precision, enable_watermark, lora_adapter)
+    # ロード済みモデルの codec_repo を優先使用（v1/v2 自動対応）
+    info = _detect_model_version_from_runtime()
+    auto_codec_repo = (
+        info[1] if info is not None
+        else _codec_repo_for_latent_dim(32)  # フォールバック: v2
+    )
+    runtime_key = _build_runtime_key(
+        checkpoint, model_device, model_precision,
+        codec_device, codec_precision, enable_watermark,
+        lora_adapter, codec_repo=auto_codec_repo,
+    )
     if str(text).strip() == "":
         raise ValueError("テキストを入力してください。")
 
@@ -572,14 +722,20 @@ def _run_generation(
     runtime, reloaded = get_cached_runtime(runtime_key)
     stdout_log(f"[gradio] runtime: {'reloaded' if reloaded else 'reused'}")
 
+    # モデルバージョン情報をログに記録
+    _ver_info = _detect_model_version_from_runtime()
+    _ver_str = f"{_ver_info[0]} (latent_dim={_ver_info[2]})" if _ver_info else "unknown"
+    stdout_log(f"[gradio] model_version: {_ver_str}")
+
     OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
 
-    # 複数候補を順番に生成する
-    # シード指定がある場合は candidate_index をオフセットとして加算し再現性を確保
     gallery_items: list[tuple[str, str]] = []
     all_detail_lines: list[str] = [
         "runtime: reloaded" if reloaded else "runtime: reused",
+        f"model_version: {_ver_str}",
     ]
+    if runtime_key.lora_path:
+        all_detail_lines.append(f"lora: {Path(runtime_key.lora_path).name}")
     last_timing_text = ""
 
     for i in range(num_candidates):
@@ -611,7 +767,6 @@ def _run_generation(
             result.audio.float(),
             result.sample_rate,
         )
-        # ギャラリーアイテム: (ファイルパス, キャプション)
         caption = f"候補 {i + 1}  seed={result.used_seed}"
         gallery_items.append((str(out_path), caption))
 
@@ -1945,6 +2100,13 @@ def build_ui() -> gr.Blocks:
                         scale=4, allow_custom_value=False,
                     )
                     infer_lora_refresh_btn = gr.Button("🔄", scale=1)
+                infer_lora_compat_status = gr.Textbox(
+                    label="LoRA互換性チェック",
+                    value="",
+                    interactive=False,
+                    lines=1,
+                    visible=False,
+                )
                 infer_lora_scale = gr.Slider(
                     label="LoRAスケール（0.0=LoRA無効 / 1.0=通常 / >1.0=強調）",
                     minimum=0.0, maximum=2.0, value=1.0, step=0.05, visible=False,
@@ -1964,13 +2126,21 @@ def build_ui() -> gr.Blocks:
                     codec_precision = gr.Dropdown(label="コーデック精度", choices=codec_precision_choices, value=codec_precision_choices[0], scale=1)
                     enable_watermark = gr.Checkbox(label="ウォーターマーク", value=False, scale=1)
 
+                # codec_repo 選択（モデルロード後に自動更新）
+                infer_codec_repo = gr.Dropdown(
+                    label="コーデックリポジトリ（モデル読み込み時に自動設定）",
+                    choices=PREPARE_CODEC_REPO_CHOICES,
+                    value="Aratako/Semantic-DACVAE-Japanese-32dim",
+                    info="v2(dim32) / v1(dim128) — モデル読み込み後に自動切替されます。",
+                    interactive=True,
+                )
+
                 with gr.Row():
                     load_model_btn  = gr.Button("📥 モデル読み込み", variant="secondary")
                     unload_model_btn= gr.Button("🗑️ メモリ解放",    variant="secondary")
-                model_status = gr.Textbox(label="モデルステータス", interactive=False, lines=3)
+                model_status = gr.Textbox(label="モデルステータス", interactive=False, lines=4)
 
                 gr.Markdown("## 音声生成")
-                infer_text = gr.Textbox(label="テキスト（合成したい文章）", lines=4)
 
                 with gr.Accordion("🎤 参照音声（省略するとno-referenceモードで生成）", open=False):
                     # スピーカーライブラリ選択時のref_latentパスを保持する隠しフィールド
@@ -2195,6 +2365,9 @@ def build_ui() -> gr.Blocks:
                     info="1回の生成で作成する候補音声の数。シード指定時は seed, seed+1, seed+2... が使われます。",
                 )
 
+                # ── テキスト入力（生成ボタン直上） ─────────────────────
+                infer_text = gr.Textbox(label="テキスト（合成したい文章）", lines=4)
+
                 generate_btn = gr.Button("🎵 生成", variant="primary", size="lg")
 
                 # ── 候補リスト（最大8候補）──────────────────────────
@@ -2337,19 +2510,44 @@ def build_ui() -> gr.Blocks:
                     lambda: gr.Dropdown(choices=["（なし）"] + _scan_lora_adapters()),
                     outputs=[infer_lora_adapter],
                 )
+
+                def _on_lora_adapter_change(v):
+                    is_active = str(v).strip() not in ("", "（なし）")
+                    compat_msg = _validate_lora_compat_ui(v) if is_active else ""
+                    return (
+                        gr.Slider(visible=is_active),
+                        gr.Textbox(visible=is_active),
+                        gr.Textbox(value=compat_msg, visible=is_active),
+                    )
+
                 infer_lora_adapter.change(
-                    lambda v: (
-                        gr.Slider(visible=(str(v).strip() not in ("", "（なし）"))),
-                        gr.Textbox(visible=(str(v).strip() not in ("", "（なし）"))),
-                    ),
+                    _on_lora_adapter_change,
                     inputs=[infer_lora_adapter],
-                    outputs=[infer_lora_scale, infer_lora_disabled_modules],
+                    outputs=[infer_lora_scale, infer_lora_disabled_modules, infer_lora_compat_status],
                 )
+
                 model_device.change(_on_model_device_change, inputs=[model_device], outputs=[model_precision])
                 codec_device.change(_on_codec_device_change, inputs=[codec_device], outputs=[codec_precision])
-                load_model_btn.click(_load_model,
-                    inputs=[infer_checkpoint, model_device, model_precision, codec_device, codec_precision, enable_watermark, infer_lora_adapter],
-                    outputs=[model_status])
+
+                def _load_model_ui(checkpoint, model_device, model_precision, codec_device, codec_precision, enable_watermark, lora_adapter, cur_lora_adapter):
+                    """モデルロード後にステータス・codec_repo・LoRA互換チェックを更新。"""
+                    status_text, auto_codec = _load_model(
+                        checkpoint, model_device, model_precision,
+                        codec_device, codec_precision, enable_watermark, lora_adapter,
+                    )
+                    # LoRAアダプタが選択中なら再チェック
+                    compat_msg = _validate_lora_compat_ui(cur_lora_adapter) if (
+                        str(cur_lora_adapter).strip() not in ("", "（なし）")
+                    ) else ""
+                    return status_text, gr.Dropdown(value=auto_codec), gr.Textbox(value=compat_msg)
+
+                load_model_btn.click(
+                    _load_model_ui,
+                    inputs=[infer_checkpoint, model_device, model_precision,
+                            codec_device, codec_precision, enable_watermark,
+                            infer_lora_adapter, infer_lora_adapter],
+                    outputs=[model_status, infer_codec_repo, infer_lora_compat_status],
+                )
                 unload_model_btn.click(_clear_runtime_cache, outputs=[model_status])
                 _ui_outputs = _cand_labels + _cand_audios + [out_log, out_timing]
                 generate_btn.click(_run_generation_ui,

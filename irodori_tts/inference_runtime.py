@@ -376,6 +376,83 @@ def _load_checkpoint_for_inference(path: Path) -> tuple[dict[str, torch.Tensor],
     return _load_checkpoint_from_pt(path)
 
 
+def _detect_model_version(model_cfg) -> str:
+    """latent_dim からモデルバージョンを判定して表示用文字列を返す。"""
+    ldim = int(model_cfg.latent_dim)
+    if ldim == 32:
+        return "v2 (latent_dim=32)"
+    if ldim == 128:
+        return "v1 (latent_dim=128)"
+    return f"unknown (latent_dim={ldim})"
+
+
+def _validate_lora_adapter(lora_path: str, model_cfg) -> list[str]:
+    """
+    LoRAアダプタとベースモデルの互換性を検証する。
+    問題があれば警告メッセージのリストを返す（エラーは呼び出し元で判断）。
+
+    検証項目:
+    1. adapter_model.safetensors の in_proj テンソル shape から
+       patched_latent_dim を逆引きしてモデル設定と照合
+    2. adapter_config.json の target_modules 形式で本家/フォーク版を識別
+    3. irodori_lora_metadata.json の存在で本家版を識別
+    """
+    import json as _json
+    warnings: list[str] = []
+    lp = Path(lora_path)
+
+    # ── adapter_config.json の読み込み ──────────────────────────────
+    adapter_config_path = lp / "adapter_config.json"
+    adapter_cfg: dict = {}
+    if adapter_config_path.is_file():
+        try:
+            adapter_cfg = _json.loads(adapter_config_path.read_text(encoding="utf-8"))
+        except Exception:
+            warnings.append("[lora] adapter_config.json の読み込みに失敗しました。")
+
+    # ── 本家版 vs フォーク版の識別 ──────────────────────────────────
+    has_metadata = (lp / "irodori_lora_metadata.json").is_file()
+    target_modules = adapter_cfg.get("target_modules")
+    is_upstream = has_metadata or (
+        isinstance(target_modules, str) and target_modules.startswith("^")
+    )
+    origin_label = "本家版" if is_upstream else "フォーク版"
+
+    # ── adapter_model.safetensors から latent_dim を逆引き ──────────
+    adapter_st_path = lp / "adapter_model.safetensors"
+    if adapter_st_path.is_file():
+        try:
+            from safetensors import safe_open as _safe_open
+            with _safe_open(str(adapter_st_path), framework="pt", device="cpu") as _h:
+                all_keys = list(_h.keys())
+
+            # in_proj の lora_A: shape (r, in_features=patched_latent_dim)
+            in_proj_key = next(
+                (k for k in all_keys if "in_proj" in k and "lora_A" in k), None
+            )
+            if in_proj_key is not None:
+                with _safe_open(str(adapter_st_path), framework="pt", device="cpu") as _h:
+                    t = _h.get_tensor(in_proj_key)
+                adapter_in_features = int(t.shape[1])
+                expected = int(model_cfg.latent_dim) * int(model_cfg.latent_patch_size)
+                if adapter_in_features != expected:
+                    warnings.append(
+                        f"[lora] ❌ 互換性エラー: アダプタの in_proj.in_features={adapter_in_features} が "
+                        f"モデルの patched_latent_dim={expected} と一致しません。"
+                        f"このLoRAは別バージョン（latent_dim が異なる）のモデル用です。"
+                    )
+                else:
+                    pass  # shape OK
+        except Exception as e:
+            warnings.append(f"[lora] アダプタ shape 検証をスキップしました: {e}")
+
+    # ── target_modules の互換性確認 ─────────────────────────────────
+    # 本家版の正規表現プリセットはフォーク版でも推論時は問題なく動作する
+    # (peft は target_modules が文字列の場合、regex として解釈する)
+
+    return warnings, origin_label, is_upstream
+
+
 def _apply_lora_settings(
     model,
     lora_scale: float,
@@ -449,6 +526,12 @@ class InferenceRuntime:
         )
         model_cfg = ModelConfig(**model_cfg_dict)
 
+        # モデルバージョンをログ出力
+        model_version = _detect_model_version(model_cfg)
+        print(f"[model] version: {model_version}", flush=True)
+        print(f"[model] tokenizer: {model_cfg.text_tokenizer_repo}", flush=True)
+        print(f"[model] latent_dim={model_cfg.latent_dim} latent_patch_size={model_cfg.latent_patch_size}", flush=True)
+
         model = TextToLatentRFDiT(model_cfg).to(model_device)
         model.load_state_dict(model_state)
         model = model.to(dtype=model_dtype)
@@ -467,6 +550,18 @@ class InferenceRuntime:
                 raise RuntimeError(
                     "LoRA推論には peft ライブラリが必要です。`pip install peft` を実行してください。"
                 ) from exc
+
+            # 互換性チェック
+            lora_warnings, lora_origin, _ = _validate_lora_adapter(key.lora_path, model_cfg)
+            print(f"[lora] adapter origin: {lora_origin}", flush=True)
+            print(f"[lora] adapter path: {key.lora_path}", flush=True)
+            for w in lora_warnings:
+                print(w, flush=True)
+            # 互換性エラー（❌を含む警告）は例外にする
+            fatal = [w for w in lora_warnings if "❌" in w]
+            if fatal:
+                raise ValueError("\n".join(fatal))
+
             model = PeftModel.from_pretrained(
                 model,
                 key.lora_path,
@@ -474,6 +569,7 @@ class InferenceRuntime:
             )
             model = model.to(dtype=model_dtype)
             model.eval()
+            print(f"[lora] loaded ({lora_origin})", flush=True)
 
         # pyファイル基準のcheckpoints/tokenizersフォルダをキャッシュ先に使用
         _tokenizer_cache_dir = (
@@ -631,9 +727,10 @@ class InferenceRuntime:
         _log(
             (
                 "[runtime] start synthesize "
-                "model_device={} model_precision={} codec_device={} codec_precision={} "
+                "model_version={} model_device={} model_precision={} codec_device={} codec_precision={} "
                 "watermark={} mode={} seconds={} steps={} seed={} candidates={} decode_mode={}"
             ).format(
+                _detect_model_version(self.model_cfg),
                 self.key.model_device,
                 self.key.model_precision,
                 self.key.codec_device,
@@ -647,6 +744,8 @@ class InferenceRuntime:
                 req.decode_mode,
             )
         )
+        if self.key.lora_path:
+            _log(f"[runtime] lora_path={self.key.lora_path} scale={req.lora_scale}")
 
         if req.seconds <= 0:
             raise ValueError(f"seconds must be > 0, got {req.seconds}")
