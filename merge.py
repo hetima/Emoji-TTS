@@ -401,6 +401,49 @@ def _make_output_filename(method_name: str, suffix: str) -> str:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# エラーメッセージ整形
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _format_compat_error(
+    mismatches: list[str],
+    cfg_a: dict[str, Any],
+    cfg_b: dict[str, Any],
+    label_a: str = "モデルA",
+    label_b: str = "モデルB",
+    context: str = "",
+) -> str:
+    """
+    互換性エラーメッセージを生成する。
+    latent_dim の不一致が含まれる場合は v1/v2 の混在であることを明示する。
+    """
+    _DIM_TO_VERSION = {32: "v2 (dim32)", 128: "v1 (dim128)"}
+
+    dim_a = cfg_a.get("latent_dim")
+    dim_b = cfg_b.get("latent_dim")
+    has_dim_mismatch = (dim_a is not None and dim_b is not None and dim_a != dim_b)
+
+    ctx = f"（{context}）" if context else ""
+
+    if has_dim_mismatch:
+        ver_a = _DIM_TO_VERSION.get(int(dim_a), f"unknown(dim={dim_a})")
+        ver_b = _DIM_TO_VERSION.get(int(dim_b), f"unknown(dim={dim_b})")
+        lines = [
+            f"❌ モデルバージョン互換性エラー{ctx}: v1/v2 混在のためマージ不可",
+            f"   {label_a}: {ver_a}  /  {label_b}: {ver_b}",
+            "   同じバージョン（どちらも v2 または どちらも v1）のモデル同士を選択してください。",
+        ]
+        other = [m for m in mismatches if "latent_dim" not in m]
+        if other:
+            lines.append("   その他の不一致:")
+            lines.extend(f"  {m}" for m in other)
+    else:
+        lines = [f"❌ model_config 互換性エラー{ctx}（アーキテクチャが異なるためマージ不可）:"]
+        lines.extend(mismatches)
+
+    return "\n".join(lines)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # メインエントリ（Gradio から呼び出す）
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -454,7 +497,7 @@ def run_merge(
             cfg_donor = _load_model_config(p_donor)
             ok, mismatches = check_config_compatibility(cfg_base, cfg_donor, "ベース", "ドナー")
             if not ok:
-                msg = "❌ model_config 互換性エラー（LoRA注入）:\n" + "\n".join(mismatches)
+                msg = _format_compat_error(mismatches, cfg_base, cfg_donor, "ベース", "ドナー", "LoRA注入")
                 return False, msg
 
             w_base  = _load_weights(p_base)
@@ -479,8 +522,7 @@ def run_merge(
         cfg_b = _load_model_config(p_b)
         ok, mismatches = check_config_compatibility(cfg_a, cfg_b, "モデルA", "モデルB")
         if not ok:
-            msg = "❌ model_config 互換性エラー（アーキテクチャが異なるためマージ不可）:\n"
-            msg += "\n".join(mismatches)
+            msg = _format_compat_error(mismatches, cfg_a, cfg_b, "モデルA", "モデルB")
             return False, msg
 
         logs.append("✅ model_config 互換性チェック: OK")
@@ -547,7 +589,7 @@ def run_merge(
             cfg_base = _load_model_config(bp)
             ok_b, mm_b = check_config_compatibility(cfg_a, cfg_base, "モデルA", "ベース")
             if not ok_b:
-                return False, "❌ model_config 互換性エラー（モデルA vs ベース）:\n" + "\n".join(mm_b)
+                return False, _format_compat_error(mm_b, cfg_a, cfg_base, "モデルA", "ベース", "Task Arithmetic ベース")
 
             w_base = _load_weights(bp)
             weights = task_arithmetic(w_base, w_a, w_b, lam_a_norm, lam_b_norm)

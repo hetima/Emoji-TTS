@@ -50,11 +50,11 @@ with gr.Blocks(title="DACVAE Manifest Generator") as demo:
                          info="例: mozilla/common_voice")
     split = gr.Dropdown(choices=["train","validation","test"], label="Split（分割）",
                         info="manifest を作るデータ分割を選択")
-    audio_col = gr.Textbox(label="音声カラム名",
-                           info="音声データが入っているカラム名")
-    text_col = gr.Textbox(label="テキストカラム名",
-                          info="発話テキストが入っているカラム名")
-    speaker_col = gr.Textbox(label="スピーカーカラム（任意）",
+    audio_col = gr.Textbox(label="音声列名",
+                           info="音声データが入っている列名")
+    text_col = gr.Textbox(label="テキスト列名",
+                          info="発話テキストが入っている列名")
+    speaker_col = gr.Textbox(label="スピーカー列（任意）",
                              info="複数話者データセットの場合はスピーカーIDが入っているカラム名")
     output_manifest = gr.Textbox(label="出力 manifest パス",
                                  info="生成する JSONL の保存ファイルパス")
