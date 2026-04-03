@@ -174,6 +174,7 @@ class _PreparedItem:
     idx: int
     status: str  # "ok", "skip", "error"
     text: str | None = None
+    caption: str | None = None
     wav: torch.Tensor | None = None
     sample_rate: int | None = None
     speaker_id: str | None = None
@@ -192,6 +193,10 @@ def _prepare_example(
     try:
         text = _coerce_text(sample.get(args.text_column, ""))
         text = text.strip()
+        caption: str | None = None
+        if args.caption_column:
+            caption = _coerce_text(sample.get(args.caption_column, ""))
+            caption = caption.strip()
 
         if not text:
             return _PreparedItem(idx=idx, status="skip", skip_reason="empty_text")
@@ -237,6 +242,7 @@ def _prepare_example(
             idx=idx,
             status="ok",
             text=text,
+            caption=caption,
             wav=wav,
             sample_rate=sr,
             speaker_id=speaker_id,
@@ -521,6 +527,10 @@ def _run_worker(
             raise ValueError(
                 f"speaker column(s) not found: {missing_speaker_columns}; available={ds.column_names}"
             )
+    if args.caption_column and args.caption_column not in ds.column_names:
+        raise ValueError(
+            f"caption column not found: {args.caption_column}; available={ds.column_names}"
+        )
 
     if args.target_sample_rate is not None:
         ds = ds.cast_column(args.audio_column, Audio(sampling_rate=args.target_sample_rate))
@@ -645,6 +655,7 @@ def _run_worker(
         wav = item.wav
         sr = item.sample_rate
         text = item.text
+        caption = item.caption
         speaker_id = item.speaker_id
         if wav is None or sr is None or text is None:
             _inc_skip("prepare_error")
@@ -671,6 +682,8 @@ def _run_worker(
             "latent_path": latent_rel,
             "num_frames": int(latent.shape[0]),
         }
+        if args.caption_column:
+            payload["caption"] = "" if caption is None else str(caption)
         if speaker_id is not None:
             payload["speaker_id"] = speaker_id
         out_f.write(json.dumps(payload, ensure_ascii=False) + "\n")
@@ -766,6 +779,11 @@ def main() -> None:
     )
     parser.add_argument("--audio-column", default="audio", help="Audio column name (default: audio)")
     parser.add_argument("--text-column", default="text", help="Text column name (default: text)")
+    parser.add_argument(
+        "--caption-column",
+        default=None,
+        help="Optional caption column name for Voice Design manifests.",
+    )
     parser.add_argument(
         "--speaker-column",
         action="append",

@@ -8,11 +8,21 @@ import subprocess
 import sys
 import threading
 import time
+import warnings
 from datetime import datetime
 from pathlib import Path
 
 import gradio as gr
 import yaml
+
+# torch.nn.utils.weight_norm deprecation warning (from upstream deps) is noisy
+# but currently harmless for inference.
+warnings.filterwarnings(
+    "ignore",
+    message=r"`torch\.nn\.utils\.weight_norm` is deprecated in favor of `torch\.nn\.utils\.parametrizations\.weight_norm`\.",
+    category=FutureWarning,
+    module=r"torch\.nn\.utils\.weight_norm",
+)
 
 try:
     import pandas as pd
@@ -414,6 +424,15 @@ def _detect_model_version_from_runtime() -> tuple[str, str, int] | None:
     return version, runtime.key.codec_repo, ldim
 
 
+def _runtime_uses_voice_design() -> bool:
+    from irodori_tts.inference_runtime import _RUNTIME_CACHE_VALUE
+
+    runtime = _RUNTIME_CACHE_VALUE
+    if runtime is None:
+        return False
+    return bool(getattr(runtime.model_cfg, "use_caption_condition", False))
+
+
 def _codec_repo_for_latent_dim(latent_dim: int) -> str:
     """latent_dim からデフォルト codec_repo を返す。"""
     if latent_dim == 32:
@@ -632,7 +651,7 @@ def _build_runtime_key(checkpoint, model_device, model_precision, codec_device, 
         lora_path=lora_path,
     )
 
-def _load_model(checkpoint, model_device, model_precision, codec_device, codec_precision, enable_watermark, lora_adapter="（なし）") -> tuple[str, str]:
+def _load_model(checkpoint, model_device, model_precision, codec_device, codec_precision, enable_watermark, lora_adapter="（なし）") -> tuple[str, str, bool]:
     """モデルをロードしてステータスと自動選択された codec_repo を返す。"""
     # ロード前にlatent_dimを先読みして正しいcodec_repoを決定する
     _raw_cp = _resolve_checkpoint_path_infer(str(checkpoint).strip())
@@ -652,6 +671,8 @@ def _load_model(checkpoint, model_device, model_precision, codec_device, codec_p
         auto_codec_repo = codec_repo_used
 
     lora_info = f"\nLoRAアダプタ: {runtime_key.lora_path}" if runtime_key.lora_path else ""
+    voice_design_enabled = _runtime_uses_voice_design()
+    vd_line = "\nvoice_design: enabled (caption conditioning)" if voice_design_enabled else "\nvoice_design: disabled"
     status_text = (
         f"{status}\n"
         f"checkpoint: {runtime_key.checkpoint}"
@@ -659,20 +680,31 @@ def _load_model(checkpoint, model_device, model_precision, codec_device, codec_p
         f"model_device: {runtime_key.model_device} / {runtime_key.model_precision}\n"
         f"codec_device: {runtime_key.codec_device} / {runtime_key.codec_precision}\n"
         f"codec_repo: {auto_codec_repo}"
+        f"{vd_line}"
         f"{lora_info}"
     )
-    return status_text, auto_codec_repo
+    return status_text, auto_codec_repo, voice_design_enabled
 
 def _clear_runtime_cache() -> str:
     clear_cached_runtime()
     return "モデルをメモリから解放しました"
 
+
+def _clear_runtime_cache_ui():
+    return (
+        _clear_runtime_cache(),
+        gr.update(visible=False, open=False),
+        gr.update(visible=True, open=False),
+    )
+
 def _run_generation(
     checkpoint, model_device, model_precision, codec_device, codec_precision, enable_watermark,
     lora_adapter, lora_scale, lora_disabled_modules_raw,
-    text, uploaded_audio, spk_ref_latent_path,
+    text, caption_text, uploaded_audio, spk_ref_latent_path,
     num_steps, seed_raw, cfg_guidance_mode, cfg_scale_text, cfg_scale_speaker,
+    cfg_scale_caption,
     cfg_scale_raw, cfg_min_t, cfg_max_t, context_kv_cache,
+    max_caption_len_raw,
     truncation_factor_raw, rescale_k_raw, rescale_sigma_raw,
     speaker_kv_scale_raw, speaker_kv_min_t_raw, speaker_kv_max_layers_raw,
     num_candidates: int = 1,
@@ -697,6 +729,7 @@ def _run_generation(
         raise ValueError("テキストを入力してください。")
 
     cfg_scale        = _parse_optional_float(cfg_scale_raw, "cfg_scale")
+    max_caption_len  = _parse_optional_int(max_caption_len_raw, "max_caption_len")
     truncation_factor= _parse_optional_float(truncation_factor_raw, "truncation_factor")
     rescale_k        = _parse_optional_float(rescale_k_raw, "rescale_k")
     rescale_sigma    = _parse_optional_float(rescale_sigma_raw, "rescale_sigma")
@@ -742,6 +775,8 @@ def _run_generation(
 
     runtime, reloaded = get_cached_runtime(runtime_key)
     stdout_log(f"[gradio] runtime: {'reloaded' if reloaded else 'reused'}")
+    use_voice_design = bool(getattr(runtime.model_cfg, "use_caption_condition", False))
+    caption_value = str(caption_text).strip() if use_voice_design and caption_text is not None else ""
 
     # モデルバージョン情報をログに記録
     _ver_info = _detect_model_version_from_runtime()
@@ -766,10 +801,14 @@ def _run_generation(
             SamplingRequest(
                 text=str(line_text), ref_wav=ref_wav, ref_latent=ref_latent_path, no_ref=bool(no_ref),
                 seconds=FIXED_SECONDS, max_ref_seconds=30.0, max_text_len=None,
+                caption=caption_value or None,
+                max_caption_len=max_caption_len,
                 num_steps=int(num_steps),
                 seed=line_seed,
                 cfg_guidance_mode=str(cfg_guidance_mode),
-                cfg_scale_text=float(cfg_scale_text), cfg_scale_speaker=float(cfg_scale_speaker),
+                cfg_scale_text=float(cfg_scale_text),
+                cfg_scale_caption=float(cfg_scale_caption),
+                cfg_scale_speaker=float(cfg_scale_speaker),
                 cfg_scale=cfg_scale, cfg_min_t=float(cfg_min_t), cfg_max_t=float(cfg_max_t),
                 truncation_factor=truncation_factor, rescale_k=rescale_k, rescale_sigma=rescale_sigma,
                 context_kv_cache=bool(context_kv_cache),
@@ -980,7 +1019,8 @@ def _build_manifest_command(
     data_source_mode,
     dataset,
     split,
-    audio_col, text_col, speaker_col,
+    prepare_mode,
+    audio_col, text_col, speaker_col, caption_col,
     output_manifest, latent_dir, device, codec_repo,
 ) -> list[str]:
     def _s(val, fallback=""):
@@ -1005,37 +1045,51 @@ def _build_manifest_command(
         cmd += ["--dataset", _s(dataset),
                 "--split",   _s(split, "train")]
 
+    mode = str(prepare_mode).strip().lower()
+    auto_codec_repo = str(codec_repo).strip()
+    if mode in {"model_v2", "voice_design"}:
+        auto_codec_repo = "Aratako/Semantic-DACVAE-Japanese-32dim"
+    elif mode == "model_v1":
+        auto_codec_repo = "facebook/dacvae-watermarked"
+    if not auto_codec_repo:
+        auto_codec_repo = DEFAULT_PREPARE_CODEC_REPO
+
     cmd += [
         "--audio-column",    _s(audio_col, "audio"),
         "--text-column",     _s(text_col, "text"),
         "--output-manifest", _s(output_manifest),
         "--latent-dir",      _s(latent_dir),
         "--device",          _s(device, "cpu"),
-        "--codec-repo",      _s(codec_repo, DEFAULT_PREPARE_CODEC_REPO),
+        "--codec-repo",      auto_codec_repo,
     ]
-    spk = _s(speaker_col)
-    if spk:
-        cmd += ["--speaker-column", spk]
+    if mode == "voice_design":
+        cap = _s(caption_col)
+        if cap:
+            cmd += ["--caption-column", cap]
+    else:
+        spk = _s(speaker_col)
+        if spk:
+            cmd += ["--speaker-column", spk]
     return cmd
 
 
 def _manifest_cmd_preview(
-    data_source_mode, dataset, split, audio_col, text_col, speaker_col,
+    data_source_mode, dataset, split, prepare_mode, audio_col, text_col, speaker_col, caption_col,
     output_manifest, latent_dir, device, codec_repo,
 ) -> str:
     return " ".join(_build_manifest_command(
-        data_source_mode, dataset, split, audio_col, text_col, speaker_col,
+        data_source_mode, dataset, split, prepare_mode, audio_col, text_col, speaker_col, caption_col,
         output_manifest, latent_dir, device, codec_repo,
     ))
 
 
 def _run_manifest(
-    data_source_mode, dataset, split, audio_col, text_col, speaker_col,
+    data_source_mode, dataset, split, prepare_mode, audio_col, text_col, speaker_col, caption_col,
     output_manifest, latent_dir, device, codec_repo,
 ) -> tuple[str, str]:
     global _active_proc, _active_log_path
     cmd_list = _build_manifest_command(
-        data_source_mode, dataset, split, audio_col, text_col, speaker_col,
+        data_source_mode, dataset, split, prepare_mode, audio_col, text_col, speaker_col, caption_col,
         output_manifest, latent_dir, device, codec_repo,
     )
     cmd_str = " ".join(cmd_list)
@@ -2244,7 +2298,7 @@ def build_ui() -> gr.Blocks:
 
                 gr.Markdown("## 音声生成")
 
-                with gr.Accordion("🎤 参照音声（省略するとno-referenceモードで生成）", open=False):
+                with gr.Accordion("🎤 参照音声（省略するとno-referenceモードで生成）", open=False) as infer_ref_accordion:
                     # スピーカーライブラリ選択時のref_latentパスを保持する隠しフィールド
                     spk_ref_latent_path = gr.Textbox(visible=False, value="")
 
@@ -2405,7 +2459,6 @@ def build_ui() -> gr.Blocks:
                             minimum=0.0, maximum=10.0, value=5.0, step=0.1,
                             info="参照音声の声質への忠実度。感情スタイルと連動します。",
                         )
-
                 # ── 詳細設定 ────────────────────────────────────────────
                 with gr.Accordion("🔬 詳細設定（上級者向け）", open=False):
                     gr.Markdown(
@@ -2505,6 +2558,23 @@ def build_ui() -> gr.Blocks:
 
                 # ── テキスト入力（生成ボタン直上） ─────────────────────
                 infer_text = gr.Textbox(label="テキスト（合成したい文章）", lines=4)
+                with gr.Accordion("🎨 Caption (Voice Design)", open=False, visible=False) as caption_vd_accordion:
+                    caption_input_vd = gr.Textbox(
+                        label="Caption (Voice Design)",
+                        value="",
+                        lines=2,
+                        placeholder="e.g. calm, bright, energetic, whispering",
+                        info="VoiceDesign モデル読み込み時のみ表示されます。",
+                    )
+                    with gr.Row():
+                        cfg_scale_caption = gr.Slider(
+                            label="Caption CFG Scale",
+                            minimum=0.0, maximum=10.0, value=3.0, step=0.1,
+                        )
+                        max_caption_len_raw = gr.Textbox(
+                            label="Max Caption Len (optional)",
+                            value="",
+                        )
 
                 generate_btn = gr.Button("🎵 生成", variant="primary", size="lg")
 
@@ -2669,7 +2739,7 @@ def build_ui() -> gr.Blocks:
 
                 def _load_model_ui(checkpoint, model_device, model_precision, codec_device, codec_precision, enable_watermark, lora_adapter, cur_lora_adapter):
                     """モデルロード後にステータス・codec_repo・LoRA互換チェックを更新。"""
-                    status_text, auto_codec = _load_model(
+                    status_text, auto_codec, voice_design_enabled = _load_model(
                         checkpoint, model_device, model_precision,
                         codec_device, codec_precision, enable_watermark, lora_adapter,
                     )
@@ -2677,25 +2747,31 @@ def build_ui() -> gr.Blocks:
                     compat_msg = _validate_lora_compat_ui(cur_lora_adapter) if (
                         str(cur_lora_adapter).strip() not in ("", "（なし）")
                     ) else ""
-                    return status_text, gr.Dropdown(value=auto_codec), gr.Textbox(value=compat_msg)
+                    return (
+                        status_text,
+                        gr.Dropdown(value=auto_codec),
+                        gr.Textbox(value=compat_msg),
+                        gr.update(visible=voice_design_enabled, open=voice_design_enabled),
+                        gr.update(visible=not voice_design_enabled, open=False),
+                    )
 
                 load_model_btn.click(
                     _load_model_ui,
                     inputs=[infer_checkpoint, model_device, model_precision,
                             codec_device, codec_precision, enable_watermark,
                             infer_lora_adapter, infer_lora_adapter],
-                    outputs=[model_status, infer_codec_repo, infer_lora_compat_status],
+                    outputs=[model_status, infer_codec_repo, infer_lora_compat_status, caption_vd_accordion, infer_ref_accordion],
                 )
-                unload_model_btn.click(_clear_runtime_cache, outputs=[model_status])
+                unload_model_btn.click(_clear_runtime_cache_ui, outputs=[model_status, caption_vd_accordion, infer_ref_accordion])
                 _ui_outputs = _cand_labels + _cand_audios + [out_log, out_timing]
                 generate_btn.click(_run_generation_ui,
                     inputs=[
                         infer_checkpoint, model_device, model_precision, codec_device, codec_precision, enable_watermark,
                         infer_lora_adapter, infer_lora_scale, infer_lora_disabled_modules,
-                        infer_text, infer_audio, spk_ref_latent_path,
+                        infer_text, caption_input_vd, infer_audio, spk_ref_latent_path,
                         num_steps, seed_raw, cfg_guidance_mode,
-                        cfg_scale_text, cfg_scale_speaker, cfg_scale_raw, cfg_min_t, cfg_max_t,
-                        context_kv_cache, truncation_factor_raw, rescale_k_raw, rescale_sigma_raw,
+                        cfg_scale_text, cfg_scale_speaker, cfg_scale_caption, cfg_scale_raw, cfg_min_t, cfg_max_t,
+                        context_kv_cache, max_caption_len_raw, truncation_factor_raw, rescale_k_raw, rescale_sigma_raw,
                         speaker_kv_scale_raw, speaker_kv_min_t_raw, speaker_kv_max_layers_raw,
                         num_candidates,
                         multiline_mode,
@@ -2718,6 +2794,12 @@ def build_ui() -> gr.Blocks:
                     label="データソース",
                     choices=["ローカルCSV", "ローカルJSONL", "HuggingFaceデータセット"],
                     value="ローカルCSV",
+                )
+                pm_prepare_mode = gr.Dropdown(
+                    label="モード",
+                    choices=["model_v1", "model_v2", "voice_design"],
+                    value="model_v2",
+                    info="model_v1=dim128, model_v2=dim32, voice_design=dim32 + caption列",
                 )
 
                 with gr.Group() as pm_local_group:
@@ -2755,6 +2837,8 @@ def build_ui() -> gr.Blocks:
                                                      choices=["text"], allow_custom_value=True)
                         pm_speaker_col = gr.Dropdown(label="話者ID列名（省略可）", value="",
                                                      choices=[""], allow_custom_value=True)
+                        pm_caption_col = gr.Dropdown(label="Caption列名（Voice Design）", value="caption",
+                                                     choices=["caption"], allow_custom_value=True, visible=False)
                     pm_col_status = gr.Textbox(label="列名取得状況", interactive=False, lines=1)
 
                 with gr.Row():
@@ -2791,54 +2875,89 @@ def build_ui() -> gr.Blocks:
                     outputs=[pm_dataset, pm_hf_name, pm_split, pm_audio_col],
                 )
 
+                def _on_pm_prepare_mode_change(mode: str):
+                    mode_key = str(mode).strip().lower()
+                    is_voice = mode_key == "voice_design"
+                    codec_repo = (
+                        "facebook/dacvae-watermarked"
+                        if mode_key == "model_v1"
+                        else "Aratako/Semantic-DACVAE-Japanese-32dim"
+                    )
+                    status = (
+                        "voice_design: caption列を使用 / codec dim32"
+                        if is_voice
+                        else ("model_v1: speaker_id列を使用 / codec dim128" if mode_key == "model_v1"
+                              else "model_v2: speaker_id列を使用 / codec dim32")
+                    )
+                    return (
+                        gr.update(visible=not is_voice),
+                        gr.update(visible=is_voice),
+                        gr.update(value=codec_repo),
+                        status,
+                    )
+
+                pm_prepare_mode.change(
+                    _on_pm_prepare_mode_change,
+                    inputs=[pm_prepare_mode],
+                    outputs=[pm_speaker_col, pm_caption_col, pm_codec_repo, pm_col_status],
+                )
+
                 def _auto_fill_columns(file_path: str, mode: str):
                     if mode == "HuggingFaceデータセット":
-                        return gr.update(), gr.update(), gr.update(), "HFデータセット: 列名を手動で入力してください。"
+                        return gr.update(), gr.update(), gr.update(), gr.update(), "HFデータセット: 列名を手動で入力してください。"
                     headers = _read_csv_headers(file_path)
                     if not headers:
-                        return gr.update(), gr.update(), gr.update(), "⚠️ 列名を取得できませんでした。ファイルパスを確認してください。"
+                        return gr.update(), gr.update(), gr.update(), gr.update(), "⚠️ 列名を取得できませんでした。ファイルパスを確認してください。"
                     audio_choices = ["audio"] + [h for h in headers if h not in {"audio", "file_name"}]
                     exclude = {"file_name", "audio", "speaker_id", "speaker"}
                     text_choices = [h for h in headers if h not in {"file_name", "audio"}]
                     text_guess = next((h for h in headers if h not in exclude), text_choices[0] if text_choices else "text")
                     spk_choices = [""] + [h for h in headers if h not in {"file_name", "audio", text_guess}]
+                    cap_choices = [""] + [h for h in headers if h not in {"file_name", "audio", text_guess}]
+                    spk_default = "speaker_id" if "speaker_id" in headers else ""
+                    cap_default = "caption" if "caption" in headers else ""
                     status = f"✅ 列名を取得しました: {headers}"
                     return (
                         gr.update(choices=audio_choices, value="audio"),
                         gr.update(choices=text_choices, value=text_guess),
-                        gr.update(choices=spk_choices, value=""),
+                        gr.update(choices=spk_choices, value=spk_default),
+                        gr.update(choices=cap_choices, value=cap_default),
                         status,
                     )
 
                 pm_dataset.change(
                     _auto_fill_columns, inputs=[pm_dataset, pm_data_source],
-                    outputs=[pm_audio_col, pm_text_col, pm_speaker_col, pm_col_status],
+                    outputs=[pm_audio_col, pm_text_col, pm_speaker_col, pm_caption_col, pm_col_status],
                 )
                 pm_data_source.change(
                     _auto_fill_columns, inputs=[pm_dataset, pm_data_source],
-                    outputs=[pm_audio_col, pm_text_col, pm_speaker_col, pm_col_status],
+                    outputs=[pm_audio_col, pm_text_col, pm_speaker_col, pm_caption_col, pm_col_status],
                 )
 
                 pm_cmd_preview = gr.Textbox(label="📋 実行コマンドプレビュー", interactive=False, lines=3)
 
                 def _get_pm_inputs_values(mode, local_path, hf_name, split,
-                                          audio_col, text_col, speaker_col,
+                                          prepare_mode, audio_col, text_col, speaker_col, caption_col,
                                           output_manifest, latent_dir, device, codec_repo):
                     src_mode = {"ローカルCSV": "local_csv",
                                 "ローカルJSONL": "local_jsonl",
                                 "HuggingFaceデータセット": "hf_dataset"}.get(mode, "local_csv")
                     dataset = hf_name if mode == "HuggingFaceデータセット" else local_path
-                    return src_mode, dataset, split, audio_col, text_col, speaker_col, output_manifest, latent_dir, device, codec_repo
+                    return (
+                        src_mode, dataset, split, prepare_mode,
+                        audio_col, text_col, speaker_col, caption_col,
+                        output_manifest, latent_dir, device, codec_repo,
+                    )
 
                 _pm_all_inputs = [pm_data_source, pm_dataset, pm_hf_name, pm_split,
-                                  pm_audio_col, pm_text_col, pm_speaker_col,
+                                  pm_prepare_mode, pm_audio_col, pm_text_col, pm_speaker_col, pm_caption_col,
                                   pm_output_manifest, pm_latent_dir, pm_device, pm_codec_repo]
 
                 def _update_pm_cmd(mode, local_path, hf_name, split,
-                                   audio_col, text_col, speaker_col,
+                                   prepare_mode, audio_col, text_col, speaker_col, caption_col,
                                    output_manifest, latent_dir, device, codec_repo):
                     args = _get_pm_inputs_values(mode, local_path, hf_name, split,
-                                                 audio_col, text_col, speaker_col,
+                                                 prepare_mode, audio_col, text_col, speaker_col, caption_col,
                                                  output_manifest, latent_dir, device, codec_repo)
                     return _manifest_cmd_preview(*args)
 
@@ -2854,10 +2973,10 @@ def build_ui() -> gr.Blocks:
                 pm_log    = gr.Textbox(label="ログ出力", interactive=False, lines=20, max_lines=20)
 
                 def _run_manifest_ui(mode, local_path, hf_name, split,
-                                     audio_col, text_col, speaker_col,
+                                     prepare_mode, audio_col, text_col, speaker_col, caption_col,
                                      output_manifest, latent_dir, device, codec_repo):
                     args = _get_pm_inputs_values(mode, local_path, hf_name, split,
-                                                 audio_col, text_col, speaker_col,
+                                                 prepare_mode, audio_col, text_col, speaker_col, caption_col,
                                                  output_manifest, latent_dir, device, codec_repo)
                     return _run_manifest(*args)
 

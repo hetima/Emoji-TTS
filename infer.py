@@ -98,6 +98,11 @@ def main() -> None:
         ),
     )
     parser.add_argument("--text", required=True)
+    parser.add_argument(
+        "--caption",
+        default=None,
+        help="Optional caption/style-control text for caption-enabled voice-design checkpoints.",
+    )
     parser.add_argument("--output-wav", default="output.wav")
     parser.add_argument(
         "--model-device",
@@ -190,6 +195,15 @@ def main() -> None:
             "Defaults to checkpoint metadata max_text_len when available, else 256."
         ),
     )
+    parser.add_argument(
+        "--max-caption-len",
+        type=int,
+        default=None,
+        help=(
+            "Maximum token length for caption conditioning. "
+            "Defaults to checkpoint metadata max_caption_len when available, else max_text_len."
+        ),
+    )
     parser.add_argument("--num-steps", type=int, default=40)
     parser.add_argument(
         "--num-candidates",
@@ -220,6 +234,7 @@ def main() -> None:
         help="Use dynamic=True for torch.compile (default: disabled).",
     )
     parser.add_argument("--cfg-scale-text", type=float, default=3.0)
+    parser.add_argument("--cfg-scale-caption", type=float, default=3.0)
     parser.add_argument("--cfg-scale-speaker", type=float, default=5.0)
     parser.add_argument(
         "--cfg-guidance-mode",
@@ -227,16 +242,16 @@ def main() -> None:
         default="independent",
         help=(
             "CFG formulation. "
-            "'independent': text/speaker unconds separately (3x NFE when both enabled), "
-            "'joint': drop both conditions together (2x NFE), "
-            "'alternating': alternate text and speaker uncond each step (2x NFE)."
+            "'independent': each enabled condition uses its own uncond pass, "
+            "'joint': drop all enabled conditions together (2x NFE), "
+            "'alternating': alternate enabled condition unconds each step."
         ),
     )
     parser.add_argument(
         "--cfg-scale",
         type=float,
         default=None,
-        help="Deprecated. If set, overrides both --cfg-scale-text and --cfg-scale-speaker.",
+        help="Deprecated. If set, overrides --cfg-scale-text/--cfg-scale-caption/--cfg-scale-speaker.",
     )
     parser.add_argument("--cfg-min-t", type=float, default=0.5)
     parser.add_argument("--cfg-max-t", type=float, default=1.0)
@@ -338,15 +353,6 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    cfg_scale_text, cfg_scale_speaker, scale_messages = resolve_cfg_scales(
-        cfg_guidance_mode=str(args.cfg_guidance_mode),
-        cfg_scale_text=float(args.cfg_scale_text),
-        cfg_scale_speaker=float(args.cfg_scale_speaker),
-        cfg_scale=float(args.cfg_scale) if args.cfg_scale is not None else None,
-    )
-    for msg in scale_messages:
-        print(msg)
-
     checkpoint_path = _resolve_checkpoint_path(args)
 
     # LoRAアダプタパスの検証
@@ -381,6 +387,22 @@ def main() -> None:
         )
     )
 
+    cfg_scale_text, cfg_scale_caption, cfg_scale_speaker, scale_messages = resolve_cfg_scales(
+        cfg_guidance_mode=str(args.cfg_guidance_mode),
+        cfg_scale_text=float(args.cfg_scale_text),
+        cfg_scale_caption=float(args.cfg_scale_caption),
+        cfg_scale_speaker=float(args.cfg_scale_speaker),
+        cfg_scale=float(args.cfg_scale) if args.cfg_scale is not None else None,
+        use_caption_condition=bool(
+            runtime.model_cfg.use_caption_condition
+            and args.caption is not None
+            and str(args.caption).strip() != ""
+        ),
+        use_speaker_condition=bool(runtime.model_cfg.use_speaker_condition),
+    )
+    for msg in scale_messages:
+        print(msg)
+
     # lora_disabled_modules: カンマ区切り文字列 → tuple[str, ...]
     _lora_disabled_raw = str(args.lora_disabled_modules).strip()
     lora_disabled_modules: tuple[str, ...] = (
@@ -391,6 +413,7 @@ def main() -> None:
     result = runtime.synthesize(
         SamplingRequest(
             text=str(args.text),
+            caption=None if args.caption is None else str(args.caption),
             ref_wav=args.ref_wav,
             ref_latent=args.ref_latent,
             no_ref=bool(args.no_ref),
@@ -403,8 +426,10 @@ def main() -> None:
             if args.max_ref_seconds is not None
             else None,
             max_text_len=None if args.max_text_len is None else int(args.max_text_len),
+            max_caption_len=None if args.max_caption_len is None else int(args.max_caption_len),
             num_steps=int(args.num_steps),
             cfg_scale_text=cfg_scale_text,
+            cfg_scale_caption=cfg_scale_caption,
             cfg_scale_speaker=cfg_scale_speaker,
             cfg_guidance_mode=str(args.cfg_guidance_mode),
             cfg_scale=None,

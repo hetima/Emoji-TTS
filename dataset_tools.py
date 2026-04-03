@@ -502,6 +502,7 @@ def caption_audio(
 
         record: dict = {
             "text": text,
+            "caption": text,
             "audio_path": str(audio_path),
         }
         if speaker_id:
@@ -534,11 +535,16 @@ def _write_csv(records: list[dict], path: Path) -> None:
         音声ファイル名.wav,読み上げたtext内容
     """
     with open(path, "w", encoding="utf-8", newline="") as f:
+        has_speaker = any(bool(rec.get("speaker_id")) for rec in records)
+        columns = ["file_name", "text", "caption"] + (["speaker_id"] if has_speaker else [])
         writer = csv.writer(f)
-        writer.writerow(["file_name", "text"])
+        writer.writerow(columns)
         for rec in records:
             file_name = Path(rec["audio_path"]).name  # フルパスからファイル名のみ抽出
-            writer.writerow([file_name, rec.get("text", "")])
+            row = [file_name, rec.get("text", ""), rec.get("caption", rec.get("text", ""))]
+            if has_speaker:
+                row.append(rec.get("speaker_id", ""))
+            writer.writerow(row)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -747,6 +753,8 @@ def emoji_caption(
         log_fn(f"  → {caption}")
         updated = dict(rec)
         updated["text"] = caption   # textカラムを絵文字付きで直接上書き
+        updated["caption"] = caption
+        updated["voice_design_caption"] = caption
         results.append(updated)
 
     # CSV上書き保存（textカラムを絵文字付きで置き換え）

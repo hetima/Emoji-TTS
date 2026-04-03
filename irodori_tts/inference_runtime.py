@@ -166,6 +166,7 @@ class RuntimeKey:
 @dataclass
 class SamplingRequest:
     text: str
+    caption: str | None = None
     ref_wav: str | None = None
     ref_latent: str | None = None
     no_ref: bool = False
@@ -176,8 +177,10 @@ class SamplingRequest:
     seconds: float = 30.0
     max_ref_seconds: float | None = 30.0
     max_text_len: int | None = None
+    max_caption_len: int | None = None
     num_steps: int = 40
     cfg_scale_text: float = 3.0
+    cfg_scale_caption: float = 3.0
     cfg_scale_speaker: float = 5.0
     cfg_guidance_mode: str = "independent"
     cfg_scale: float | None = None
@@ -245,31 +248,40 @@ def resolve_cfg_scales(
     *,
     cfg_guidance_mode: str,
     cfg_scale_text: float,
+    cfg_scale_caption: float,
     cfg_scale_speaker: float,
     cfg_scale: float | None,
-) -> tuple[float, float, list[str]]:
+    use_caption_condition: bool = True,
+    use_speaker_condition: bool = True,
+) -> tuple[float, float, float, list[str]]:
     """Normalize/validate CFG scales for guidance mode."""
     messages: list[str] = []
     text_val = float(cfg_scale_text)
+    caption_val = float(cfg_scale_caption)
     speaker_val = float(cfg_scale_speaker)
 
     if cfg_scale is not None:
         text_val = float(cfg_scale)
+        caption_val = float(cfg_scale)
         speaker_val = float(cfg_scale)
+    if not use_speaker_condition:
+        if speaker_val > 0.0:
+            messages.append(
+                "info: speaker conditioning is disabled for this checkpoint; ignoring cfg_scale_speaker."
+            )
+        speaker_val = 0.0
 
     mode = str(cfg_guidance_mode).strip().lower()
-    if (
-        mode == "joint"
-        and text_val > 0.0
-        and speaker_val > 0.0
-        and abs(text_val - speaker_val) > 1e-6
-    ):
+    enabled_vals = [value for value in (text_val, speaker_val) if value > 0.0]
+    if use_caption_condition and caption_val > 0.0:
+        enabled_vals.append(caption_val)
+    if mode == "joint" and enabled_vals and (max(enabled_vals) - min(enabled_vals) > 1e-6):
         raise ValueError(
-            "cfg_guidance_mode='joint' requires equal cfg_scale_text/cfg_scale_speaker, "
+            "cfg_guidance_mode='joint' requires equal enabled cfg_scale_text/cfg_scale_caption/cfg_scale_speaker, "
             "or set cfg_scale."
         )
 
-    return text_val, speaker_val, messages
+    return text_val, caption_val, speaker_val, messages
 
 
 def _load_torch_checkpoint_payload(path: Path) -> dict:
@@ -280,7 +292,7 @@ def _load_torch_checkpoint_payload(path: Path) -> dict:
 
 
 _CONFIG_META_KEY = "config_json"
-_INFERENCE_CONFIG_KEYS = {"max_text_len", "fixed_target_latent_steps"}
+_INFERENCE_CONFIG_KEYS = {"max_text_len", "max_caption_len", "fixed_target_latent_steps"}
 
 
 def _load_checkpoint_from_pt(path: Path) -> tuple[dict[str, torch.Tensor], dict, dict | None]:
@@ -376,89 +388,56 @@ def _load_checkpoint_for_inference(path: Path) -> tuple[dict[str, torch.Tensor],
     return _load_checkpoint_from_pt(path)
 
 
-def _detect_model_version(model_cfg) -> str:
-    """latent_dim からモデルバージョンを判定して表示用文字列を返す。"""
-    ldim = int(model_cfg.latent_dim)
-    if ldim == 32:
-        return "v2 (latent_dim=32)"
-    if ldim == 128:
-        return "v1 (latent_dim=128)"
-    return f"unknown (latent_dim={ldim})"
-
-
-def _validate_lora_adapter(lora_path: str, model_cfg) -> list[str]:
-    """
-    LoRAアダプタとベースモデルの互換性を検証する。
-    問題があれば警告メッセージのリストを返す（エラーは呼び出し元で判断）。
-
-    検証項目:
-    1. adapter_model.safetensors の in_proj テンソル shape から
-       patched_latent_dim を逆引きしてモデル設定と照合
-    2. adapter_config.json の target_modules 形式で本家/フォーク版を識別
-    3. irodori_lora_metadata.json の存在で本家版を識別
-    """
+def _validate_lora_adapter(
+    lora_path: str, model_cfg: ModelConfig
+) -> tuple[list[str], str, bool]:
     import json as _json
+
     warnings: list[str] = []
     lp = Path(lora_path)
 
-    # ── adapter_config.json の読み込み ──────────────────────────────
     adapter_config_path = lp / "adapter_config.json"
     adapter_cfg: dict = {}
     if adapter_config_path.is_file():
         try:
             adapter_cfg = _json.loads(adapter_config_path.read_text(encoding="utf-8"))
         except Exception:
-            warnings.append("[lora] adapter_config.json の読み込みに失敗しました。")
+            warnings.append("[lora] failed to read adapter_config.json.")
 
-    # ── 本家版 vs フォーク版の識別 ──────────────────────────────────
     has_metadata = (lp / "irodori_lora_metadata.json").is_file()
     target_modules = adapter_cfg.get("target_modules")
     is_upstream = has_metadata or (
         isinstance(target_modules, str) and target_modules.startswith("^")
     )
-    origin_label = "本家版" if is_upstream else "フォーク版"
+    origin_label = "upstream" if is_upstream else "fork"
 
-    # ── adapter_model.safetensors から latent_dim を逆引き ──────────
     adapter_st_path = lp / "adapter_model.safetensors"
     if adapter_st_path.is_file():
         try:
-            from safetensors import safe_open as _safe_open
-            with _safe_open(str(adapter_st_path), framework="pt", device="cpu") as _h:
-                all_keys = list(_h.keys())
-
-            # in_proj の lora_A: shape (r, in_features=patched_latent_dim)
-            in_proj_key = next(
-                (k for k in all_keys if "in_proj" in k and "lora_A" in k), None
-            )
+            with safe_open(str(adapter_st_path), framework="pt", device="cpu") as handle:
+                all_keys = list(handle.keys())
+            in_proj_key = next((k for k in all_keys if "in_proj" in k and "lora_A" in k), None)
             if in_proj_key is not None:
-                with _safe_open(str(adapter_st_path), framework="pt", device="cpu") as _h:
-                    t = _h.get_tensor(in_proj_key)
+                with safe_open(str(adapter_st_path), framework="pt", device="cpu") as handle:
+                    t = handle.get_tensor(in_proj_key)
                 adapter_in_features = int(t.shape[1])
                 expected = int(model_cfg.latent_dim) * int(model_cfg.latent_patch_size)
                 if adapter_in_features != expected:
                     warnings.append(
-                        f"[lora] ❌ 互換性エラー: アダプタの in_proj.in_features={adapter_in_features} が "
-                        f"モデルの patched_latent_dim={expected} と一致しません。"
-                        f"このLoRAは別バージョン（latent_dim が異なる）のモデル用です。"
+                        "[lora] incompatible adapter: in_proj.in_features="
+                        f"{adapter_in_features} but model patched_latent_dim={expected}."
                     )
-                else:
-                    pass  # shape OK
         except Exception as e:
-            warnings.append(f"[lora] アダプタ shape 検証をスキップしました: {e}")
-
-    # ── target_modules の互換性確認 ─────────────────────────────────
-    # 本家版の正規表現プリセットはフォーク版でも推論時は問題なく動作する
-    # (peft は target_modules が文字列の場合、regex として解釈する)
+            warnings.append(f"[lora] skipped adapter shape validation: {e}")
 
     return warnings, origin_label, is_upstream
 
 
 def _apply_lora_settings(
-    model,
+    model: TextToLatentRFDiT,
     lora_scale: float,
     lora_disabled_modules: tuple[str, ...],
 ) -> None:
-    """推論開始時にLoRAスケール・無効モジュールを適用する。"""
     disabled_set = set(lora_disabled_modules) if lora_disabled_modules else set()
     applied = 0
     for name, module in model.named_modules():
@@ -470,15 +449,14 @@ def _apply_lora_settings(
             applied += 1
     if applied == 0:
         import warnings
+
         warnings.warn(
-            "lora_path is set but no LoRA scaling layers were found in the model. "
-            "LoRA scale/disabled_modules settings may not have taken effect.",
+            "lora_path is set but no LoRA scaling layers were found in the model.",
             stacklevel=3,
         )
 
 
-def _restore_lora_defaults(model) -> None:
-    """推論終了後にLoRAスケールをデフォルト (1.0) に戻す。"""
+def _restore_lora_defaults(model: TextToLatentRFDiT) -> None:
     for module in model.modules():
         if hasattr(module, "scaling"):
             for adapter_name in list(getattr(module, "scaling", {})):
@@ -494,8 +472,10 @@ class InferenceRuntime:
         train_cfg: dict | None,
         model: TextToLatentRFDiT,
         tokenizer: PretrainedTextTokenizer,
+        caption_tokenizer: PretrainedTextTokenizer | None,
         codec: DACVAECodec,
         default_text_max_len: int,
+        default_caption_max_len: int,
     ) -> None:
         self.key = key
         self.model_device = resolve_runtime_device(key.model_device)
@@ -504,8 +484,10 @@ class InferenceRuntime:
         self.train_cfg = train_cfg
         self.model = model
         self.tokenizer = tokenizer
+        self.caption_tokenizer = caption_tokenizer
         self.codec = codec
         self.default_text_max_len = default_text_max_len
+        self.default_caption_max_len = default_caption_max_len
         self._infer_lock = threading.Lock()
 
     @classmethod
@@ -526,12 +508,6 @@ class InferenceRuntime:
         )
         model_cfg = ModelConfig(**model_cfg_dict)
 
-        # モデルバージョンをログ出力
-        model_version = _detect_model_version(model_cfg)
-        print(f"[model] version: {model_version}", flush=True)
-        print(f"[model] tokenizer: {model_cfg.text_tokenizer_repo}", flush=True)
-        print(f"[model] latent_dim={model_cfg.latent_dim} latent_patch_size={model_cfg.latent_patch_size}", flush=True)
-
         model = TextToLatentRFDiT(model_cfg).to(model_device)
         model.load_state_dict(model_state)
         model = model.to(dtype=model_dtype)
@@ -542,23 +518,23 @@ class InferenceRuntime:
             dynamic=bool(key.compile_dynamic),
         )
 
-        # LoRAアダプタのロード（lora_path が指定されている場合のみ）
         if key.lora_path:
             try:
                 from peft import PeftModel
             except ImportError as exc:
                 raise RuntimeError(
-                    "LoRA推論には peft ライブラリが必要です。`pip install peft` を実行してください。"
+                    "LoRA adapter support requires peft. Install with `pip install peft`."
                 ) from exc
 
-            # 互換性チェック
-            lora_warnings, lora_origin, _ = _validate_lora_adapter(key.lora_path, model_cfg)
+            lora_warnings, lora_origin, _ = _validate_lora_adapter(
+                key.lora_path,
+                model_cfg,
+            )
             print(f"[lora] adapter origin: {lora_origin}", flush=True)
             print(f"[lora] adapter path: {key.lora_path}", flush=True)
-            for w in lora_warnings:
-                print(w, flush=True)
-            # 互換性エラー（❌を含む警告）は例外にする
-            fatal = [w for w in lora_warnings if "❌" in w]
+            for msg in lora_warnings:
+                print(msg, flush=True)
+            fatal = [msg for msg in lora_warnings if "incompatible adapter" in msg]
             if fatal:
                 raise ValueError("\n".join(fatal))
 
@@ -571,43 +547,61 @@ class InferenceRuntime:
             model.eval()
             print(f"[lora] loaded ({lora_origin})", flush=True)
 
-        # pyファイル基準のcheckpoints/tokenizersフォルダをキャッシュ先に使用
-        _tokenizer_cache_dir = (
+        tokenizer_cache_dir = (
             Path(__file__).resolve().parent.parent / "checkpoints" / "tokenizers"
         )
-        _tokenizer_cache_dir.mkdir(parents=True, exist_ok=True)
+        tokenizer_cache_dir.mkdir(parents=True, exist_ok=True)
+
         tokenizer = PretrainedTextTokenizer.from_pretrained(
             repo_id=model_cfg.text_tokenizer_repo,
             add_bos=bool(model_cfg.text_add_bos),
             local_files_only=False,
-            cache_dir=str(_tokenizer_cache_dir),
+            cache_dir=str(tokenizer_cache_dir),
         )
         if tokenizer.vocab_size != model_cfg.text_vocab_size:
             raise ValueError(
                 f"text_vocab_size mismatch: checkpoint text_vocab_size={model_cfg.text_vocab_size} but tokenizer "
                 f"({model_cfg.text_tokenizer_repo}) vocab_size={tokenizer.vocab_size}."
             )
+        caption_tokenizer = None
+        if model_cfg.use_caption_condition:
+            caption_tokenizer = PretrainedTextTokenizer.from_pretrained(
+                repo_id=model_cfg.caption_tokenizer_repo_resolved,
+                add_bos=model_cfg.caption_add_bos_resolved,
+                local_files_only=False,
+                cache_dir=str(tokenizer_cache_dir),
+            )
+            if caption_tokenizer.vocab_size != model_cfg.caption_vocab_size_resolved:
+                raise ValueError(
+                    f"caption_vocab_size mismatch: checkpoint caption_vocab_size={model_cfg.caption_vocab_size_resolved} but tokenizer ({model_cfg.caption_tokenizer_repo_resolved}) "
+                    f"vocab_size={caption_tokenizer.vocab_size}."
+                )
 
         default_text_max_len = 256
+        default_caption_max_len = default_text_max_len
         if isinstance(train_cfg, dict):
             ckpt_text_max_len = train_cfg.get("max_text_len")
             if isinstance(ckpt_text_max_len, int) and ckpt_text_max_len > 0:
                 default_text_max_len = int(ckpt_text_max_len)
+            ckpt_caption_max_len = train_cfg.get("max_caption_len")
+            if isinstance(ckpt_caption_max_len, int) and ckpt_caption_max_len > 0:
+                default_caption_max_len = int(ckpt_caption_max_len)
+            else:
+                default_caption_max_len = default_text_max_len
 
-        # pyファイル基準のcheckpoints/codecsフォルダをキャッシュ先に使用
         codec_repo_safe = str(key.codec_repo).replace("/", "_").replace("\\", "_")
-        _codec_cache_dir = (
+        codec_cache_dir = (
             Path(__file__).resolve().parent.parent / "checkpoints" / "codecs" / codec_repo_safe
         )
-        _codec_cache_dir.mkdir(parents=True, exist_ok=True)
+        codec_cache_dir.mkdir(parents=True, exist_ok=True)
         codec = DACVAECodec.load(
             repo_id=key.codec_repo,
             device=str(codec_device),
             dtype=codec_dtype,
-            enable_watermark=bool(key.enable_watermark),
             deterministic_encode=bool(key.codec_deterministic_encode),
             deterministic_decode=bool(key.codec_deterministic_decode),
-            local_dir=str(_codec_cache_dir),
+            enable_watermark=bool(key.enable_watermark),
+            local_dir=str(codec_cache_dir),
         )
         if model_cfg.latent_dim != codec.latent_dim:
             raise ValueError(
@@ -621,8 +615,10 @@ class InferenceRuntime:
             train_cfg=train_cfg if isinstance(train_cfg, dict) else None,
             model=model,
             tokenizer=tokenizer,
+            caption_tokenizer=caption_tokenizer,
             codec=codec,
             default_text_max_len=default_text_max_len,
+            default_caption_max_len=default_caption_max_len,
         )
 
     def _load_reference_latent(
@@ -631,8 +627,14 @@ class InferenceRuntime:
         req: SamplingRequest,
         batch_size: int,
         messages: list[str],
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
         runtime_dtype = next(self.model.parameters()).dtype
+        if not self.model_cfg.use_speaker_condition:
+            if req.ref_wav is not None or req.ref_latent is not None:
+                messages.append(
+                    "info: speaker conditioning is disabled for this checkpoint; ignoring reference input."
+                )
+            return None, None
         if req.no_ref:
             ref_len = max(1, int(self.model_cfg.speaker_patch_size))
             ref_latent_patched = torch.zeros(
@@ -727,10 +729,9 @@ class InferenceRuntime:
         _log(
             (
                 "[runtime] start synthesize "
-                "model_version={} model_device={} model_precision={} codec_device={} codec_precision={} "
+                "model_device={} model_precision={} codec_device={} codec_precision={} "
                 "watermark={} mode={} seconds={} steps={} seed={} candidates={} decode_mode={}"
             ).format(
-                _detect_model_version(self.model_cfg),
                 self.key.model_device,
                 self.key.model_precision,
                 self.key.codec_device,
@@ -768,6 +769,18 @@ class InferenceRuntime:
         )
         if text_max_len <= 0:
             raise ValueError(f"max_text_len must be > 0, got {text_max_len}")
+        caption_max_len = (
+            self.default_caption_max_len
+            if req.max_caption_len is None
+            else int(req.max_caption_len)
+        )
+        if self.model_cfg.use_caption_condition and caption_max_len <= 0:
+            raise ValueError(f"max_caption_len must be > 0, got {caption_max_len}")
+        has_caption_text = bool(
+            self.model_cfg.use_caption_condition
+            and req.caption is not None
+            and str(req.caption).strip() != ""
+        )
 
         truncation_factor = None if req.truncation_factor is None else float(req.truncation_factor)
         rescale_k = None if req.rescale_k is None else float(req.rescale_k)
@@ -787,15 +800,23 @@ class InferenceRuntime:
             None if req.speaker_kv_max_layers is None else int(req.speaker_kv_max_layers)
         )
         if speaker_kv_scale is not None:
-            if speaker_kv_scale <= 0:
-                raise ValueError(f"speaker_kv_scale must be > 0, got {speaker_kv_scale}")
-            speaker_kv_min_t = 0.9 if req.speaker_kv_min_t is None else float(req.speaker_kv_min_t)
-            if not (0.0 <= speaker_kv_min_t <= 1.0):
-                raise ValueError(f"speaker_kv_min_t must be in [0, 1], got {speaker_kv_min_t}")
-            if speaker_kv_max_layers is not None and speaker_kv_max_layers < 0:
-                raise ValueError(
-                    f"speaker_kv_max_layers must be >= 0 when specified, got {speaker_kv_max_layers}"
+            if not self.model_cfg.use_speaker_condition:
+                messages.append(
+                    "info: speaker conditioning is disabled for this checkpoint; ignoring speaker_kv_scale."
                 )
+                speaker_kv_scale = None
+            else:
+                if speaker_kv_scale <= 0:
+                    raise ValueError(f"speaker_kv_scale must be > 0, got {speaker_kv_scale}")
+                speaker_kv_min_t = (
+                    0.9 if req.speaker_kv_min_t is None else float(req.speaker_kv_min_t)
+                )
+                if not (0.0 <= speaker_kv_min_t <= 1.0):
+                    raise ValueError(f"speaker_kv_min_t must be in [0, 1], got {speaker_kv_min_t}")
+                if speaker_kv_max_layers is not None and speaker_kv_max_layers < 0:
+                    raise ValueError(
+                        f"speaker_kv_max_layers must be >= 0 when specified, got {speaker_kv_max_layers}"
+                    )
 
         cfg_mode = str(req.cfg_guidance_mode).strip().lower()
         if cfg_mode not in {"independent", "joint", "alternating"}:
@@ -804,11 +825,14 @@ class InferenceRuntime:
                 "Expected one of: independent, joint, alternating."
             )
 
-        cfg_scale_text, cfg_scale_speaker, scale_messages = resolve_cfg_scales(
+        cfg_scale_text, cfg_scale_caption, cfg_scale_speaker, scale_messages = resolve_cfg_scales(
             cfg_guidance_mode=cfg_mode,
             cfg_scale_text=req.cfg_scale_text,
+            cfg_scale_caption=req.cfg_scale_caption,
             cfg_scale_speaker=req.cfg_scale_speaker,
             cfg_scale=req.cfg_scale,
+            use_caption_condition=has_caption_text,
+            use_speaker_condition=self.model_cfg.use_speaker_condition,
         )
         messages.extend(scale_messages)
         for msg in scale_messages:
@@ -826,11 +850,10 @@ class InferenceRuntime:
         post_load_t0 = _measure_start(self.model_device, self.codec_device)
 
         with self._infer_lock, torch.inference_mode():
-            # LoRA設定の動的適用
-            _lora_active = self.key.lora_path is not None and any(
-                hasattr(m, "scaling") for m in self.model.modules()
+            lora_active = self.key.lora_path is not None and any(
+                hasattr(module, "scaling") for module in self.model.modules()
             )
-            if _lora_active:
+            if lora_active:
                 _apply_lora_settings(self.model, req.lora_scale, req.lora_disabled_modules)
             try:
                 t0 = _measure_start(self.model_device)
@@ -843,6 +866,22 @@ class InferenceRuntime:
                 _log(f"[runtime] tokenize_text: {stage_sec * 1000.0:.1f} ms")
                 text_ids = text_ids.to(self.model_device)
                 text_mask = text_mask.to(self.model_device)
+                caption_ids = None
+                caption_mask = None
+                if self.model_cfg.use_caption_condition:
+                    if self.caption_tokenizer is None:
+                        raise RuntimeError(
+                            "Caption conditioning is enabled but caption tokenizer is not loaded."
+                        )
+                    caption_text = "" if req.caption is None else str(req.caption).strip()
+                    caption_ids, caption_mask = self.caption_tokenizer.batch_encode(
+                        [caption_text] * num_candidates,
+                        max_length=caption_max_len,
+                    )
+                    if caption_text == "":
+                        caption_mask.zero_()
+                    caption_ids = caption_ids.to(self.model_device)
+                    caption_mask = caption_mask.to(self.model_device)
 
                 target_samples = int(float(req.seconds) * self.codec.sample_rate)
                 latent_steps = math.ceil(target_samples / int(self.codec.model.hop_length))
@@ -879,8 +918,11 @@ class InferenceRuntime:
                     ref_latent=ref_latent,
                     ref_mask=ref_mask,
                     sequence_length=patched_steps,
+                    caption_input_ids=caption_ids,
+                    caption_mask=caption_mask,
                     num_steps=int(req.num_steps),
                     cfg_scale_text=cfg_scale_text,
+                    cfg_scale_caption=cfg_scale_caption,
                     cfg_scale_speaker=cfg_scale_speaker,
                     cfg_guidance_mode=cfg_mode,
                     cfg_min_t=float(req.cfg_min_t),
@@ -952,9 +994,8 @@ class InferenceRuntime:
 
                 total_to_decode = _measure_end(self.model_device, post_load_t0, self.codec_device)
                 _log(f"[runtime] total_to_decode: {total_to_decode:.3f} s")
-
             finally:
-                if _lora_active:
+                if lora_active:
                     _restore_lora_defaults(self.model)
 
         _log("[runtime] done synthesize")
@@ -971,6 +1012,8 @@ class InferenceRuntime:
     def unload(self) -> None:
         del self.model
         del self.tokenizer
+        if self.caption_tokenizer is not None:
+            del self.caption_tokenizer
         del self.codec
         gc.collect()
         for device in (self.model_device, self.codec_device):
