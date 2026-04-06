@@ -3,6 +3,7 @@ from pathlib import Path
 # ─────────────────────────────────────────────────────────────────────────────
 # パス定数
 # ─────────────────────────────────────────────────────────────────────────────
+REPO_DIR         = Path(__file__).resolve().parent
 BASE_DIR         = Path(__file__).resolve().parent
 CHECKPOINTS_DIR  = BASE_DIR / "checkpoints"
 CONFIGS_DIR      = BASE_DIR / "configs"
@@ -17,7 +18,7 @@ PREPARE_CODEC_REPO_CHOICES = [
     "facebook/dacvae-watermarked",             # v1 (dim128)
 ]
 FIXED_SECONDS    = 30.0
-DATASET_TOOLS    = BASE_DIR / "dataset_tools.py"
+DATASET_TOOLS    = REPO_DIR / "dataset_tools.py"
 DEFAULT_DATASET_DIR = BASE_DIR / "my_dataset"
 SPEAKERS_DIR        = BASE_DIR / "speakers"
 

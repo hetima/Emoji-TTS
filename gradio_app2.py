@@ -169,7 +169,7 @@ def _run_create_speaker(
     if _cached_runtime is None:
         return (
             "エラー: モデルが読み込まれていません。\n"
-            "先に「📥 モデル読み込み」ボタンを押してください。"
+            "先に「モデル読み込み」ボタンを押してください。"
         )
 
     # checkpoint / device / precision の一致確認（codec_repo はキャッシュから自動使用）
@@ -192,7 +192,7 @@ def _run_create_speaker(
         return (
             f"エラー: 現在読み込み中のモデル設定と登録パネルの設定が一致しません。\n"
             f"不一致フィールド: {', '.join(_mismatch)}\n"
-            "推論タブの設定と一致させてから「📥 モデル読み込み」を実行してください。"
+            "推論タブの設定と一致させてから「モデル読み込み」を実行してください。"
         )
 
     codec = _cached_runtime.codec
@@ -511,31 +511,6 @@ def _ensure_default_model() -> None:
         print(f"[gradio] 自動ダウンロード失敗: {e}", flush=True)
 
 
-def _download_from_hf(repo_id_input: str) -> tuple[gr.Dropdown, str]:
-    repo_id = str(repo_id_input).strip()
-    if not repo_id:
-        return gr.Dropdown(), "エラー: repo_id を入力してください。"
-    try:
-        from huggingface_hub import hf_hub_download
-        safe_name = repo_id.replace("/", "_")
-        local_dir = cnf.CHECKPOINTS_DIR / safe_name
-        local_dir.mkdir(parents=True, exist_ok=True)
-        dest = local_dir / "model.safetensors"
-        if dest.is_file():
-            msg = f"スキップ: すでに存在します\n{dest}"
-        else:
-            downloaded = hf_hub_download(
-                repo_id=repo_id, filename="model.safetensors", local_dir=str(local_dir),
-            )
-            dest = Path(downloaded)
-            msg = f"ダウンロード完了:\n{dest}"
-        checkpoints = _scan_checkpoints()
-        return gr.Dropdown(choices=checkpoints, value=str(dest)), msg
-    except Exception as e:
-        checkpoints = _scan_checkpoints()
-        return gr.Dropdown(choices=checkpoints), f"エラー: {e}"
-
-
 # ─────────────────────────────────────────────────────────────────────────────
 # 推論タブ ロジック
 # ─────────────────────────────────────────────────────────────────────────────
@@ -688,8 +663,6 @@ def _run_generation(
     truncation_factor_raw, rescale_k_raw, rescale_sigma_raw,
     speaker_kv_scale_raw, speaker_kv_min_t_raw, speaker_kv_max_layers_raw,
     num_candidates: int = 1,
-    multiline_mode: str = "デフォルト",
-    silence_sec: float = 0.1,
     filename_prefix: str = "",
 ) -> tuple[list[tuple[str, str]], str, str]:
     def stdout_log(msg: str) -> None:
@@ -743,19 +716,7 @@ def _run_generation(
     else:
         no_ref = True
 
-    # ── 改行分割モードの判定 ────────────────────────────────────────
-    _multiline_mode = str(multiline_mode).strip()
-    _use_multiline = _multiline_mode in (
-        "改行ごとに連続生成で終了",
-        "改行ごとに連続生成後に連結",
-    )
-    _use_concat = _multiline_mode == "改行ごとに連続生成後に連結"
-
-    # 改行分割モード時は候補数を強制的に1に固定
-    if _use_multiline:
-        num_candidates = 1
-    else:
-        num_candidates = max(1, int(num_candidates))
+    num_candidates = max(1, int(num_candidates))
 
     runtime, reloaded = get_cached_runtime(runtime_key)
     stdout_log(f"[gradio] runtime: {'reloaded' if reloaded else 'reused'}")
@@ -773,7 +734,6 @@ def _run_generation(
     all_detail_lines: list[str] = [
         "runtime: reloaded" if reloaded else "runtime: reused",
         f"model_version: {_ver_str}",
-        f"multiline_mode: {_multiline_mode}",
     ]
     if runtime_key.lora_path:
         all_detail_lines.append(f"lora: {Path(runtime_key.lora_path).name}")
@@ -804,105 +764,29 @@ def _run_generation(
             log_fn=stdout_log,
         )
 
-    # ── 改行分割モード ──────────────────────────────────────────────
-    if _use_multiline:
-        import torch as _torch
+    for i in range(num_candidates):
+        candidate_seed = None if seed is None else (seed + i)
+        stdout_log(f"[gradio] generating candidate {i + 1}/{num_candidates} ...")
 
-        lines = [ln for ln in str(text).split("\n") if ln.strip()]
-        if not lines:
-            raise ValueError("有効なテキスト行がありません。")
+        result = _synthesize_line(str(text), candidate_seed)
 
-        all_detail_lines.append(f"分割行数: {len(lines)}")
-        if _use_concat:
-            all_detail_lines.append(f"無音区間: {silence_sec:.1f}秒")
+        stamp    = datetime.now().strftime("%Y%m%d_%H%M%S")
+        out_path = save_wav(
+            cnf.OUTPUTS_DIR / f"{filename_prefix}_{stamp}_c{i + 1}.wav",
+            result.audio.float(),
+            result.sample_rate,
+        )
+        caption = f"候補 {i + 1}  seed={result.used_seed}"
+        gallery_items.append((str(out_path), caption))
 
-        line_results = []
-        for li, line in enumerate(lines):
-            line_seed = None if seed is None else (seed + li)
-            stdout_log(f"[gradio] generating line {li + 1}/{len(lines)}: {line[:40]!r} ...")
-            result = _synthesize_line(line, line_seed)
-            line_results.append(result)
-            all_detail_lines.append(
-                f"[行 {li + 1}] seed={result.used_seed}  text={line[:40]!r}"
-            )
-            for msg in result.messages:
-                all_detail_lines.append(f"  {msg}")
-            last_timing_text = _format_timings(result.stage_timings, result.total_to_decode)
+        all_detail_lines.append(
+            f"[候補 {i + 1}] seed={result.used_seed}  saved={out_path}"
+        )
+        for msg in result.messages:
+            all_detail_lines.append(f"  {msg}")
 
-        if _use_concat:
-            # ── 連結モード: 無音区間を挟んで1ファイルに結合 ──────────
-            sample_rate = line_results[0].sample_rate
-            silence_samples = int(silence_sec * sample_rate)
-
-            audio_segments = []
-            for li, result in enumerate(line_results):
-                audio_segments.append(result.audio.float())
-                if li < len(line_results) - 1 and silence_samples > 0:
-                    silence_tensor = _torch.zeros(
-                        result.audio.shape[0] if result.audio.dim() > 1 else 1,
-                        silence_samples,
-                        dtype=_torch.float32,
-                    ) if result.audio.dim() > 1 else _torch.zeros(
-                        silence_samples,
-                        dtype=_torch.float32,
-                    )
-                    audio_segments.append(silence_tensor)
-
-            if line_results[0].audio.dim() > 1:
-                concatenated = _torch.cat(audio_segments, dim=-1)
-            else:
-                concatenated = _torch.cat(audio_segments, dim=0)
-
-            stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-            out_path = save_wav(
-                cnf.OUTPUTS_DIR / f"{filename_prefix}_{stamp}_concat.wav",
-                concatenated,
-                sample_rate,
-            )
-            caption = f"連結音声  {len(lines)}行  無音{silence_sec:.1f}秒"
-            gallery_items.append((str(out_path), caption))
-            all_detail_lines.append(f"連結保存: {out_path}")
-            stdout_log(f"[gradio] concatenated saved: {out_path}")
-
-        else:
-            # ── 個別保存モード: 行ごとに別ファイルとして保存 ──────────
-            stamp_base = datetime.now().strftime("%Y%m%d_%H%M%S")
-            for li, result in enumerate(line_results):
-                out_path = save_wav(
-                    cnf.OUTPUTS_DIR / f"{filename_prefix}_{stamp_base}_line{li + 1}.wav",
-                    result.audio.float(),
-                    result.sample_rate,
-                )
-                caption = f"行 {li + 1}  seed={result.used_seed}"
-                gallery_items.append((str(out_path), caption))
-                all_detail_lines.append(f"[行 {li + 1}] saved={out_path}")
-                stdout_log(f"[gradio] line {li + 1} saved: {out_path}")
-
-    # ── 通常モード（デフォルト） ────────────────────────────────────
-    else:
-        for i in range(num_candidates):
-            candidate_seed = None if seed is None else (seed + i)
-            stdout_log(f"[gradio] generating candidate {i + 1}/{num_candidates} ...")
-
-            result = _synthesize_line(str(text), candidate_seed)
-
-            stamp    = datetime.now().strftime("%Y%m%d_%H%M%S")
-            out_path = save_wav(
-                cnf.OUTPUTS_DIR / f"{filename_prefix}_{stamp}_c{i + 1}.wav",
-                result.audio.float(),
-                result.sample_rate,
-            )
-            caption = f"候補 {i + 1}  seed={result.used_seed}"
-            gallery_items.append((str(out_path), caption))
-
-            all_detail_lines.append(
-                f"[候補 {i + 1}] seed={result.used_seed}  saved={out_path}"
-            )
-            for msg in result.messages:
-                all_detail_lines.append(f"  {msg}")
-
-            last_timing_text = _format_timings(result.stage_timings, result.total_to_decode)
-            stdout_log(f"[gradio] candidate {i + 1} saved: {out_path}")
+        last_timing_text = _format_timings(result.stage_timings, result.total_to_decode)
+        stdout_log(f"[gradio] candidate {i + 1} saved: {out_path}")
 
     detail_text = "\n".join(all_detail_lines)
     return gallery_items, detail_text, last_timing_text
@@ -1013,7 +897,7 @@ def _build_manifest_command(
         s = str(val).strip()
         return s if s else fallback
 
-    cmd = [sys.executable, str(cnf.BASE_DIR / "prepare_manifest.py")]
+    cmd = [sys.executable, str(cnf.REPO_DIR / "prepare_manifest.py")]
 
     if data_source_mode == "local_csv":
         csv_path = Path(_s(dataset))
@@ -1234,9 +1118,9 @@ def _build_train_command(
 ) -> list[str]:
     if int(num_gpus) > 1:
         cmd = [sys.executable, "-m", "torch.distributed.run",
-               f"--nproc_per_node={num_gpus}", str(cnf.BASE_DIR / "train.py")]
+               f"--nproc_per_node={num_gpus}", str(cnf.REPO_DIR / "train.py")]
     else:
-        cmd = [sys.executable, str(cnf.BASE_DIR / "train.py")]
+        cmd = [sys.executable, str(cnf.REPO_DIR / "train.py")]
 
     cmd += [
         "--config", str(config_path),
@@ -1557,7 +1441,7 @@ def _run_convert(input_pt: str) -> str:
     p = Path(input_pt)
     if not p.is_file():
         return f"エラー: ファイルが見つかりません: {p}"
-    cmd = f"{sys.executable} {cnf.BASE_DIR / 'convert_checkpoint_to_safetensors.py'} {p}"
+    cmd = f"{sys.executable} {cnf.REPO_DIR / 'convert_checkpoint_to_safetensors.py'} {p}"
     try:
         result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=300)
         out = result.stdout + result.stderr
@@ -1824,7 +1708,7 @@ def _build_lora_train_command(
     wandb_enabled, wandb_project, wandb_run_name,
     seed,
 ) -> list[str]:
-    cmd = [sys.executable, str(cnf.BASE_DIR / "lora_train.py")]
+    cmd = [sys.executable, str(cnf.REPO_DIR / "lora_train.py")]
     cmd += ["--base-model", str(base_model)]
     cmd += ["--manifest", str(manifest)]
 
@@ -2050,7 +1934,7 @@ def _run_lora_convert(input_full_dir: str, force: bool = False) -> str:
     p = Path(input_full_dir)
     if not p.is_dir():
         return f"エラー: フォルダが存在しません: {p}"
-    cmd = [sys.executable, str(cnf.BASE_DIR / "convert_lora_checkpoint.py"), str(p)]
+    cmd = [sys.executable, str(cnf.REPO_DIR / "convert_lora_checkpoint.py"), str(p)]
     if force:
         cmd += ["--force"]
     result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
@@ -2064,123 +1948,6 @@ def _run_lora_convert(input_full_dir: str, force: bool = False) -> str:
 # ─────────────────────────────────────────────────────────────────────────────
 # UI 構築
 # ─────────────────────────────────────────────────────────────────────────────
-
-# ─────────────────────────────────────────────────────────────────────────────
-# ダークモード切り替え用 CSS / JS（モジュールトップレベル）
-# ─────────────────────────────────────────────────────────────────────────────
-_DARK_CSS = """
-/* ── ダークモード変数 ── */
-.dark-mode {
-    --bg-primary:    #1a1a1a;
-    --bg-secondary:  #2a2a2a;
-    --bg-tertiary:   #333333;
-    --text-primary:  #e8e8e8;
-    --text-secondary:#aaaaaa;
-    --border-color:  #444444;
-    --accent:        #7c9cbf;
-}
-.dark-mode .gradio-container,
-.dark-mode body {
-    background-color: var(--bg-primary) !important;
-    color: var(--text-primary) !important;
-}
-.dark-mode .gr-box,
-.dark-mode .gr-panel,
-.dark-mode .gr-form,
-.dark-mode .gr-block,
-.dark-mode .block,
-.dark-mode .panel,
-.dark-mode fieldset {
-    background-color: var(--bg-secondary) !important;
-    border-color: var(--border-color) !important;
-}
-.dark-mode .tab-nav button,
-.dark-mode .tabs > .tab-nav > button {
-    background-color: var(--bg-tertiary) !important;
-    color: var(--text-primary) !important;
-    border-color: var(--border-color) !important;
-}
-.dark-mode .tab-nav button.selected {
-    background-color: var(--accent) !important;
-    color: #ffffff !important;
-}
-.dark-mode input,
-.dark-mode textarea,
-.dark-mode select,
-.dark-mode .gr-textbox textarea,
-.dark-mode .gr-textbox input {
-    background-color: var(--bg-tertiary) !important;
-    color: var(--text-primary) !important;
-    border-color: var(--border-color) !important;
-}
-.dark-mode label,
-.dark-mode .gr-label,
-.dark-mode .label-wrap span {
-    color: var(--text-secondary) !important;
-}
-.dark-mode .gr-button-secondary,
-.dark-mode button.secondary {
-    background-color: var(--bg-tertiary) !important;
-    color: var(--text-primary) !important;
-    border-color: var(--border-color) !important;
-}
-.dark-mode .gr-accordion,
-.dark-mode details,
-.dark-mode details summary {
-    background-color: var(--bg-secondary) !important;
-    color: var(--text-primary) !important;
-    border-color: var(--border-color) !important;
-}
-.dark-mode .gr-slider input[type=range] {
-    accent-color: var(--accent) !important;
-}
-.dark-mode .gr-dropdown,
-.dark-mode .wrap {
-    background-color: var(--bg-tertiary) !important;
-    color: var(--text-primary) !important;
-    border-color: var(--border-color) !important;
-}
-#dark-mode-toggle-btn {
-    position: fixed;
-    top: 12px;
-    right: 18px;
-    z-index: 9999;
-    padding: 5px 14px;
-    border-radius: 20px;
-    border: 1px solid #888;
-    background: #f0f0f0;
-    color: #333;
-    font-size: 13px;
-    cursor: pointer;
-    transition: background 0.2s, color 0.2s;
-    box-shadow: 0 2px 6px rgba(0,0,0,0.15);
-}
-.dark-mode #dark-mode-toggle-btn {
-    background: #444 !important;
-    color: #eee !important;
-    border-color: #666 !important;
-}
-"""
-
-_DARK_JS = """
-function() {
-    if (!document.getElementById('dark-mode-toggle-btn')) {
-        var btn = document.createElement('button');
-        btn.id = 'dark-mode-toggle-btn';
-        btn.textContent = '🌙 ダーク';
-        document.body.appendChild(btn);
-        if (localStorage.getItem('irodori_dark') === '1') {
-            document.body.classList.add('dark-mode');
-            btn.textContent = '☀️ ライト';
-        }
-        btn.addEventListener('click', function() {
-            var isDark = document.body.classList.toggle('dark-mode');
-            btn.textContent = isDark ? '☀️ ライト' : '🌙 ダーク';
-            localStorage.setItem('irodori_dark', isDark ? '1' : '0');
-        });
-    }
-}
-"""
 
 def build_ui(args: argparse.Namespace) -> gr.Blocks:
     _ensure_default_model()
@@ -2202,8 +1969,6 @@ def build_ui(args: argparse.Namespace) -> gr.Blocks:
     def _v(key, fallback=None):
         return default_cfg.get(key, fallback)
 
-    # ダークモードCSS/JSはモジュールトップレベル (_DARK_CSS/_DARK_JS) で定義
-
     with gr.Blocks(title="Irodori-TTS GUI") as demo:
         gr.Markdown("# Irodori-TTS GUI")
 
@@ -2215,15 +1980,6 @@ def build_ui(args: argparse.Namespace) -> gr.Blocks:
             with gr.Tab("🔊 推論"):
                 gr.Markdown("## モデル設定")
 
-                with gr.Accordion("⬇️ HuggingFace からモデルをダウンロード", open=not bool(initial_checkpoints)):
-                    with gr.Row():
-                        hf_repo_id = gr.Textbox(
-                            label="HuggingFace repo id", value=cnf.DEFAULT_HF_REPO,
-                            placeholder="org/model-name", scale=4,
-                        )
-                        hf_dl_btn = gr.Button("ダウンロード", scale=1)
-                    hf_dl_status = gr.Textbox(label="ダウンロード状況", interactive=False, lines=2)
-
                 with gr.Row():
                     infer_checkpoint = gr.Dropdown(
                         label="チェックポイント (.pt / .safetensors)",
@@ -2231,7 +1987,7 @@ def build_ui(args: argparse.Namespace) -> gr.Blocks:
                         value=default_checkpoint or None,
                         scale=4, allow_custom_value=False,
                     )
-                    infer_refresh_btn = gr.Button("🔄 更新", scale=1)
+                    infer_refresh_btn = gr.Button("更新", scale=1)
 
                 with gr.Row():
                     infer_lora_adapter = gr.Dropdown(
@@ -2240,7 +1996,7 @@ def build_ui(args: argparse.Namespace) -> gr.Blocks:
                         value="（なし）",
                         scale=4, allow_custom_value=False,
                     )
-                    infer_lora_refresh_btn = gr.Button("🔄 更新", scale=1)
+                    infer_lora_refresh_btn = gr.Button("更新", scale=1)
                 infer_lora_compat_status = gr.Textbox(
                     label="LoRA互換性チェック",
                     value="",
@@ -2276,20 +2032,20 @@ def build_ui(args: argparse.Namespace) -> gr.Blocks:
                         interactive=True,
                     )
                     with gr.Row():
-                        load_model_btn  = gr.Button("📥 モデル読み込み", variant="secondary")
-                        unload_model_btn= gr.Button("🗑️ メモリ解放",    variant="secondary")
+                        load_model_btn  = gr.Button("モデル読み込み", variant="secondary")
+                        unload_model_btn= gr.Button("モデル解放",    variant="secondary")
                     
                     model_status = gr.Textbox(label="モデルステータス", interactive=False, lines=4)
 
                 gr.Markdown("## 音声生成")
 
-                with gr.Accordion("🎤 参照音声 | Voice Design", open=False):
+                with gr.Accordion("参照音声 | Voice Design", open=False):
                     # スピーカーライブラリ選択時のref_latentパスを保持する隠しフィールド
                     spk_ref_latent_path = gr.Textbox(visible=False, value="")
 
                     with gr.Tabs():
                         # ── タブ1: 直接アップロード ──────────────────────
-                        with gr.Tab("🎙️ 直接アップロード"):
+                        with gr.Tab("直接アップロード"):
                             infer_audio = gr.Audio(label="参照音声", type="filepath")
                             # アップロード時はスピーカーライブラリの選択をクリア
                             infer_audio.change(
@@ -2299,7 +2055,7 @@ def build_ui(args: argparse.Namespace) -> gr.Blocks:
                             )
 
                         # ── タブ2: スピーカーライブラリ ──────────────────
-                        with gr.Tab("🎭 スピーカーライブラリ"):
+                        with gr.Tab("スピーカーライブラリ"):
                             with gr.Row():
                                 spk_select = gr.Dropdown(
                                     label="キャラクター",
@@ -2307,7 +2063,7 @@ def build_ui(args: argparse.Namespace) -> gr.Blocks:
                                     value="（使用しない）",
                                     scale=4,
                                 )
-                                spk_lib_refresh = gr.Button("🔄", scale=1)
+                                spk_lib_refresh = gr.Button("更新", scale=1)
                             spk_info = gr.Textbox(
                                 label="登録情報", interactive=False, lines=2
                             )
@@ -2341,11 +2097,11 @@ def build_ui(args: argparse.Namespace) -> gr.Blocks:
                             )
 
                         # ── タブ3: スピーカー登録 ─────────────────────────
-                        with gr.Tab("➕ スピーカー登録"):
+                        with gr.Tab("スピーカー登録"):
                             gr.Markdown(
                                 "参照WAVをDACVAEエンコードして `speakers/{名前}/` に\n"
                                 "`ref.wav` / `ref.pt` / `profile.json` の3ファイルを生成します。\n\n"
-                                "> **事前条件**: 上部の「📥 モデル読み込み」を完了してから実行してください。"
+                                "> **事前条件**: 上部の「モデル読み込み」を完了してから実行してください。"
                             )
                             spk_reg_name = gr.Textbox(
                                 label="キャラクター名",
@@ -2356,7 +2112,7 @@ def build_ui(args: argparse.Namespace) -> gr.Blocks:
                                 type="filepath",
                             )
                             spk_reg_btn = gr.Button(
-                                "💾 登録", variant="primary"
+                                "登録", variant="primary"
                             )
                             spk_reg_status = gr.Textbox(
                                 label="結果", interactive=False, lines=4
@@ -2378,11 +2134,11 @@ def build_ui(args: argparse.Namespace) -> gr.Blocks:
                                 outputs=[spk_select],
                             )
                         # ── タブ4: Voice Design ─────────────────────────
-                        with gr.Tab("🎨 Voice Design Caption"):
+                        with gr.Tab("Voice Design Caption"):
                             caption_input_vd = gr.Textbox(
                                 label="Caption (Voice Design)",
                                 value="",
-                                lines=2,
+                                lines=3,
                                 placeholder="e.g. calm, bright, energetic, whispering",
                                 info="VoiceDesign 対応モデル読み込み時のみ有効",
                             )
@@ -2397,17 +2153,17 @@ def build_ui(args: argparse.Namespace) -> gr.Blocks:
                                 )
 
                 # ── 感情スタイルプリセット ──────────────────────────────
-                with gr.Accordion("🎭 感情スタイル", open=True):
+                with gr.Accordion("感情スタイル", open=False):
                     gr.Markdown(
                         "プリセットボタンを押すと、下の各パラメータが自動設定されます。"
                         "その後スライダーを手動調整することも可能です。"
                     )
                     with gr.Row():
-                        preset_normal  = gr.Button("😐 ノーマル",   variant="secondary", scale=1)
-                        preset_strong  = gr.Button("😤 力強く",     variant="secondary", scale=1)
-                        preset_calm    = gr.Button("😌 おとなしく", variant="secondary", scale=1)
-                        preset_bright  = gr.Button("😊 明るく",     variant="secondary", scale=1)
-                        preset_whisper = gr.Button("🤫 ひそやかに", variant="secondary", scale=1)
+                        preset_normal  = gr.Button("ノーマル",   variant="secondary", scale=1)
+                        preset_strong  = gr.Button("力強く",     variant="secondary", scale=1)
+                        preset_calm    = gr.Button("おとなしく", variant="secondary", scale=1)
+                        preset_bright  = gr.Button("明るく",     variant="secondary", scale=1)
+                        preset_whisper = gr.Button("ひそやかに", variant="secondary", scale=1)
 
                     gr.Markdown("##### スタイル調整パラメータ")
                     with gr.Row():
@@ -2430,7 +2186,7 @@ def build_ui(args: argparse.Namespace) -> gr.Blocks:
                         )
 
                 # ── サンプリング設定 ────────────────────────────────────
-                with gr.Accordion("🎛️ サンプリング設定", open=True):
+                with gr.Accordion("サンプリング設定", open=True):
                     with gr.Row():
                         num_steps = gr.Slider(
                             label="ステップ数（多いほど品質向上・低速）",
@@ -2439,7 +2195,7 @@ def build_ui(args: argparse.Namespace) -> gr.Blocks:
                         seed_raw = gr.Textbox(label="シード（空白=ランダム）", value="")
 
                 # ── CFG設定 ─────────────────────────────────────────────
-                with gr.Accordion("⚙️ CFG設定", open=False):
+                with gr.Accordion("CFG設定", open=False):
                     gr.Markdown(
                         "**CFG（Classifier-Free Guidance）** はモデルが条件（テキスト・話者）をどれだけ"
                         "強く守るかを制御します。値が大きいほど条件に忠実になりますが、高すぎると"
@@ -2463,7 +2219,7 @@ def build_ui(args: argparse.Namespace) -> gr.Blocks:
                             info="参照音声の声質への忠実度。感情スタイルと連動します。",
                         )
                 # ── 詳細設定 ────────────────────────────────────────────
-                with gr.Accordion("🔬 詳細設定（上級者向け）", open=False):
+                with gr.Accordion("詳細設定（上級者向け）", open=False):
                     gr.Markdown(
                         "通常は変更不要です。動作確認・実験用途向けの項目です。"
                     )
@@ -2515,42 +2271,6 @@ def build_ui(args: argparse.Namespace) -> gr.Blocks:
                     # 詳細設定には表示しない（テキストボックスは後処理用に内部保持）
                     truncation_factor_raw = gr.Textbox(visible=False, value="")
                     speaker_kv_scale_raw  = gr.Textbox(visible=False, value="")
-
-                # ── 改行分割生成オプション ───────────────────────────────
-                with gr.Accordion("📝 改行分割生成オプション", open=False):
-                    gr.Markdown(
-                        "プロンプトの改行ごとに生成を区切り、連続生成・連結するオプションです。\n"
-                        "- **デフォルト**: テキスト全体を1回で生成します（従来の動作）\n"
-                        "- **改行ごとに連続生成で終了**: 改行ごとに個別ファイルをギャラリーに出力します\n"
-                        "- **改行ごとに連続生成後に連結**: 改行ごとに生成後、無音区間を挟んで1ファイルに連結します\n\n"
-                        "> 改行分割モード選択時は「生成候補数」が自動的に1に固定されます。"
-                    )
-                    multiline_mode = gr.Dropdown(
-                        label="改行分割生成モード",
-                        choices=[
-                            "デフォルト",
-                            "改行ごとに連続生成で終了",
-                            "改行ごとに連続生成後に連結",
-                        ],
-                        value="デフォルト",
-                        info="デフォルト=通常生成 / 連続生成=行ごとに個別出力 / 連結=無音区間を挟んで1ファイルに結合",
-                    )
-                    silence_sec = gr.Slider(
-                        label="無音区間（秒）",
-                        minimum=0.1, maximum=3.0, value=0.1, step=0.1,
-                        interactive=False,
-                        info="連結モード時に行間に挿入する無音の長さ（連結モード以外では無効）",
-                    )
-
-                    def _on_multiline_mode_change(mode: str):
-                        is_concat = mode == "改行ごとに連続生成後に連結"
-                        return gr.Slider(interactive=is_concat)
-
-                    multiline_mode.change(
-                        _on_multiline_mode_change,
-                        inputs=[multiline_mode],
-                        outputs=[silence_sec],
-                    )
 
                 with gr.Row():
                     # ── 候補数設定 ──────────────────────────────────────────
@@ -2703,7 +2423,6 @@ def build_ui(args: argparse.Namespace) -> gr.Blocks:
                     lambda v: v, inputs=[cfg_scale_speaker], outputs=[style_cfg_speaker],
                 )
 
-                hf_dl_btn.click(_download_from_hf, inputs=[hf_repo_id], outputs=[infer_checkpoint, hf_dl_status])
                 infer_refresh_btn.click(
                     lambda: gr.Dropdown(choices=_scan_checkpoints(), value=(_scan_checkpoints() or [None])[-1]),
                     outputs=[infer_checkpoint],
@@ -2766,8 +2485,6 @@ def build_ui(args: argparse.Namespace) -> gr.Blocks:
                         context_kv_cache, max_caption_len_raw, truncation_factor_raw, rescale_k_raw, rescale_sigma_raw,
                         speaker_kv_scale_raw, speaker_kv_min_t_raw, speaker_kv_max_layers_raw,
                         num_candidates,
-                        multiline_mode,
-                        silence_sec,
                         filename_prefix,
                     ],
                     outputs=_ui_outputs,
@@ -2816,7 +2533,7 @@ def build_ui(args: argparse.Namespace) -> gr.Blocks:
                             visible=False,
                         )
 
-                with gr.Accordion("📋 列名設定", open=True):
+                with gr.Accordion("列名設定", open=True):
                     gr.Markdown(
                         "**ローカルCSV / JSONL（audiofolder形式）の列名**\n"
                         "- 音声列: `audio` 固定（CSV・JSONL の `file_name` 列を audiofolder が読み込み時に `audio` へ自動置換）\n"
@@ -2927,7 +2644,7 @@ def build_ui(args: argparse.Namespace) -> gr.Blocks:
                     outputs=[pm_audio_col, pm_text_col, pm_speaker_col, pm_caption_col, pm_col_status],
                 )
 
-                pm_cmd_preview = gr.Textbox(label="📋 実行コマンドプレビュー", interactive=False, lines=3)
+                pm_cmd_preview = gr.Textbox(label="実行コマンドプレビュー", interactive=False, lines=3)
 
                 def _get_pm_inputs_values(mode, local_path, hf_name, split,
                                           prepare_mode, audio_col, text_col, speaker_col, caption_col,
@@ -2958,9 +2675,9 @@ def build_ui(args: argparse.Namespace) -> gr.Blocks:
                     comp.change(_update_pm_cmd, inputs=_pm_all_inputs, outputs=[pm_cmd_preview])
 
                 with gr.Row():
-                    pm_run_btn  = gr.Button("▶️ 実行", variant="primary")
-                    pm_stop_btn = gr.Button("⏹️ 停止", variant="stop")
-                    pm_log_btn  = gr.Button("🔄 ログ更新")
+                    pm_run_btn  = gr.Button("実行", variant="primary")
+                    pm_stop_btn = gr.Button("停止", variant="stop")
+                    pm_log_btn  = gr.Button("ログ更新")
 
                 pm_status = gr.Textbox(label="実行状況", interactive=False, lines=2)
                 pm_log    = gr.Textbox(label="ログ出力", interactive=False, lines=20, max_lines=20)
@@ -2984,19 +2701,19 @@ def build_ui(args: argparse.Namespace) -> gr.Blocks:
             with gr.Tab("🏋️ 学習"):
                 gr.Markdown("## 学習設定")
 
-                with gr.Accordion("💾 プリセット管理（configs/ フォルダ）", open=True):
+                with gr.Accordion("プリセット管理（configs/ フォルダ）", open=True):
                     with gr.Row():
                         preset_dropdown = gr.Dropdown(
                             label="プリセット選択", choices=initial_configs,
                             value=default_config or None, scale=3,
                         )
-                        preset_refresh_btn = gr.Button("🔄 更新", scale=1)
+                        preset_refresh_btn = gr.Button("更新", scale=1)
                     with gr.Row():
                         preset_name_input = gr.Textbox(
                             label="保存ファイル名（例: my_config.yaml）",
                             value="my_config.yaml", scale=3,
                         )
-                        preset_save_btn = gr.Button("💾 保存", scale=1)
+                        preset_save_btn = gr.Button("保存", scale=1)
                     preset_status = gr.Textbox(label="プリセット操作結果", interactive=False, lines=1)
 
                 with gr.Row():
@@ -3006,7 +2723,7 @@ def build_ui(args: argparse.Namespace) -> gr.Blocks:
                         value=initial_manifests[-1] if initial_manifests else None,
                         allow_custom_value=True, scale=3,
                     )
-                    train_manifest_refresh = gr.Button("🔄", scale=1)
+                    train_manifest_refresh = gr.Button("更新", scale=1)
                 train_output_dir = gr.Textbox(
                     label="学習出力フォルダ（チェックポイント保存先）",
                     value=str(cnf.OUTPUTS_DIR / "irodori_tts"),
@@ -3027,7 +2744,7 @@ def build_ui(args: argparse.Namespace) -> gr.Blocks:
                         info="sdpa=推奨 / flash2=FlashAttention2要インストール / sage=SageAttention要インストール",
                     )
 
-                with gr.Accordion("🔁 ベースモデル・追加学習設定", open=True):
+                with gr.Accordion("ベースモデル・追加学習設定", open=True):
                     _default_safetensors = str(
                         cnf.CHECKPOINTS_DIR / "Aratako_Irodori-TTS-500M-v2" / "model.safetensors"
                     )
@@ -3053,7 +2770,7 @@ def build_ui(args: argparse.Namespace) -> gr.Blocks:
                         info=f"空欄の場合、resume有効時は {_default_safetensors} を自動参照します。",
                     )
 
-                with gr.Accordion("⚙️ バッチ・精度設定", open=True):
+                with gr.Accordion("バッチ・精度設定", open=True):
                     gr.Markdown("*バッチサイズと勾配蓄積ステップの積が実効バッチサイズになります。*")
                     with gr.Row():
                         t_batch_size  = gr.Slider(label="バッチサイズ（GPUメモリに合わせて調整）", minimum=1, maximum=64, value=_v("batch_size", 4), step=1)
@@ -3066,7 +2783,7 @@ def build_ui(args: argparse.Namespace) -> gr.Blocks:
                         t_compile_model      = gr.Checkbox(label="torch.compileを使用（初回遅延あり）", value=_v("compile_model", False))
                         t_precision          = gr.Dropdown(label="学習精度", choices=["bf16", "fp32", "fp16"], value=_v("precision", "bf16"))
 
-                with gr.Accordion("🔧 オプティマイザ設定", open=True):
+                with gr.Accordion("オプティマイザ設定", open=True):
                     gr.Markdown("*Muon: 行列重み向けの高性能オプティマイザ。AdamW: 汎用的で安定。*")
                     with gr.Row():
                         t_optimizer    = gr.Dropdown(label="オプティマイザ", choices=["muon", "adamw", "lion", "ademamix", "sgd"], value=_v("optimizer", "muon"))
@@ -3078,7 +2795,7 @@ def build_ui(args: argparse.Namespace) -> gr.Blocks:
                         t_adam_beta2   = gr.Number(label="Adam β2（AdamW使用時）", value=_v("adam_beta2", 0.999))
                         t_adam_eps     = gr.Number(label="Adam ε（AdamW使用時）", value=_v("adam_eps", 1e-8))
 
-                with gr.Accordion("📈 学習率スケジューラ", open=True):
+                with gr.Accordion("学習率スケジューラ", open=True):
                     gr.Markdown("*wsd: warmup→stable→decay の3段階スケジュール。cosine: コサインアニーリング。*")
                     with gr.Row():
                         t_lr_scheduler  = gr.Dropdown(label="スケジューラ種別", choices=["wsd", "cosine", "none"], value=_v("lr_scheduler", "wsd"))
@@ -3086,7 +2803,7 @@ def build_ui(args: argparse.Namespace) -> gr.Blocks:
                         t_stable_steps  = gr.Number(label="安定期ステップ数（wsdのみ）", value=_v("stable_steps", 2100), precision=0)
                         t_min_lr_scale  = gr.Number(label="最小学習率スケール比率（0〜1）", value=_v("min_lr_scale", 0.01))
 
-                with gr.Accordion("🔢 学習ステップ・テキスト設定", open=True):
+                with gr.Accordion("学習ステップ・テキスト設定", open=True):
                     with gr.Row():
                         t_max_steps             = gr.Number(label="最大学習ステップ数", value=_v("max_steps", 3000), precision=0)
                         t_max_text_len          = gr.Number(label="テキスト最大トークン長", value=_v("max_text_len", 256), precision=0)
@@ -3094,33 +2811,33 @@ def build_ui(args: argparse.Namespace) -> gr.Blocks:
                         t_fixed_target_latent_steps = gr.Number(label="固定ターゲットラテント長", value=_v("fixed_target_latent_steps", 750), precision=0)
                         t_fixed_target_full_mask= gr.Checkbox(label="固定ターゲット全マスク", value=_v("fixed_target_full_mask", True))
 
-                with gr.Accordion("🎲 Conditioningドロップアウト・タイムステップ", open=False):
+                with gr.Accordion("Conditioningドロップアウト・タイムステップ", open=False):
                     gr.Markdown("*ドロップアウト率を高めると過学習防止。小データセットでは0.1〜0.2推奨。*")
                     with gr.Row():
                         t_text_dropout      = gr.Slider(label="テキスト条件ドロップアウト率（0=無効）", minimum=0.0, maximum=0.5, value=_v("text_condition_dropout", 0.15), step=0.01)
                         t_speaker_dropout   = gr.Slider(label="話者条件ドロップアウト率（0=無効）", minimum=0.0, maximum=0.5, value=_v("speaker_condition_dropout", 0.15), step=0.01)
                         t_timestep_stratified= gr.Checkbox(label="タイムステップ層化サンプリング（安定化に有効）", value=_v("timestep_stratified", True))
 
-                with gr.Accordion("💾 グラフ更新・チェックポイント保存設定", open=False):
+                with gr.Accordion("グラフ更新・チェックポイント保存設定", open=False):
                     with gr.Row():
                         t_log_every  = gr.Number(label="グラフ描画間隔（ステップ数）", value=_v("log_every", 10), precision=0,
                                                  info="この間隔でloss/lrをログ出力→グラフに反映。ファイル保存とは無関係。")
                         t_save_every = gr.Number(label="チェックポイント保存間隔（ステップ数）", value=_v("save_every", 100), precision=0)
 
-                with gr.Accordion("📊 Weights & Biases 設定", open=False):
+                with gr.Accordion("Weights & Biases 設定", open=False):
                     gr.Markdown("*wandb_enabledをオンにするとクラウドでリアルタイム学習曲線を確認できます。*")
                     with gr.Row():
                         t_wandb_enabled  = gr.Checkbox(label="W&B を有効化", value=_v("wandb_enabled", False))
                         t_wandb_project  = gr.Textbox(label="W&B プロジェクト名", value=_v("wandb_project", "") or "")
                         t_wandb_run_name = gr.Textbox(label="W&B 実行名（省略可）", value=_v("wandb_run_name", "") or "")
 
-                with gr.Accordion("✅ バリデーション設定", open=False):
+                with gr.Accordion("バリデーション設定", open=False):
                     gr.Markdown("*valid_ratioを0より大きくするとバリデーションlossを監視できます。early_stoppingには必須。*")
                     with gr.Row():
                         t_valid_ratio= gr.Slider(label="バリデーション分割比率（0=無効）", minimum=0.0, maximum=0.5, value=_v("valid_ratio", 0.0), step=0.01)
                         t_valid_every= gr.Number(label="バリデーション実行間隔（ステップ数）", value=_v("valid_every", 100), precision=0)
 
-                with gr.Accordion("🔀 オプション機能", open=False):
+                with gr.Accordion("オプション機能", open=False):
                     gr.Markdown("*Early Stoppingはvalid_ratio > 0 のときのみ有効。EMAは推論品質向上に有効。*")
                     with gr.Row():
                         t_early_stopping = gr.Checkbox(label="Early Stopping を有効化（valid lossが改善しなくなったら自動停止）", value=False)
@@ -3131,15 +2848,15 @@ def build_ui(args: argparse.Namespace) -> gr.Blocks:
                         t_ema_decay= gr.Number(label="EMA減衰率（0に近いほど追従速度が速い）", value=0.9999)
                     t_seed = gr.Number(label="乱数シード（再現性のために固定推奨）", value=_v("seed", 0), precision=0)
 
-                gr.Markdown("### 📋 実行コマンドプレビュー")
+                gr.Markdown("### 実行コマンドプレビュー")
                 train_cmd_preview = gr.Textbox(label="コマンドライン（確認用）", interactive=False, lines=3)
 
                 with gr.Row():
-                    train_start_btn = gr.Button("▶️ 学習開始", variant="primary", size="lg")
-                    train_stop_btn  = gr.Button("⏹️ 学習停止", variant="stop")
+                    train_start_btn = gr.Button("▶学習開始", variant="primary", size="lg")
+                    train_stop_btn  = gr.Button("⏹学習停止", variant="stop")
                 train_status = gr.Textbox(label="実行状況", interactive=False, lines=2)
 
-                gr.Markdown("### 📈 学習ログ・グラフ")
+                gr.Markdown("### 学習ログ・グラフ")
                 with gr.Row():
                     auto_refresh_interval = gr.Slider(
                         label="自動更新間隔（秒）",
@@ -3147,7 +2864,7 @@ def build_ui(args: argparse.Namespace) -> gr.Blocks:
                         info="学習中にログ・グラフを自動更新する間隔です。",
                         scale=3,
                     )
-                    train_log_refresh_btn = gr.Button("🔄 手動更新", scale=1)
+                    train_log_refresh_btn = gr.Button("手動更新", scale=1)
 
                 train_log_text = gr.Textbox(label="学習ログ（末尾200行）", interactive=False, lines=15, max_lines=15, elem_id="train_log_text")
 
@@ -3361,7 +3078,7 @@ def build_ui(args: argparse.Namespace) -> gr.Blocks:
                 )
 
                 # ── プリセット管理 ── ← 追加
-                with gr.Accordion("💾 プリセット管理（configs/ フォルダ）", open=True):
+                with gr.Accordion("プリセット管理（configs/ フォルダ）", open=True):
                     with gr.Row():
                         lora_preset_dropdown = gr.Dropdown(
                             label="プリセット選択",
@@ -3369,14 +3086,14 @@ def build_ui(args: argparse.Namespace) -> gr.Blocks:
                             value=None,
                             scale=3,
                         )
-                        lora_preset_refresh_btn = gr.Button("🔄 更新", scale=1)
+                        lora_preset_refresh_btn = gr.Button("更新", scale=1)
                     with gr.Row():
                         lora_preset_name_input = gr.Textbox(
                             label="保存ファイル名（例: my_lora.yaml）",
                             value="my_lora.yaml",
                             scale=3,
                         )
-                        lora_preset_save_btn = gr.Button("💾 保存", scale=1)
+                        lora_preset_save_btn = gr.Button("保存", scale=1)
                     lora_preset_status = gr.Textbox(label="プリセット操作結果", interactive=False, lines=1)
 
                 # ── ベースモデル ──
@@ -3391,7 +3108,7 @@ def build_ui(args: argparse.Namespace) -> gr.Blocks:
                         ),
                         allow_custom_value=True, scale=4,
                     )
-                    lora_base_refresh_btn = gr.Button("🔄 更新", scale=1)
+                    lora_base_refresh_btn = gr.Button("更新", scale=1)
 
                 # ── マニフェスト ──
                 with gr.Row():
@@ -3401,7 +3118,7 @@ def build_ui(args: argparse.Namespace) -> gr.Blocks:
                         value=initial_manifests[-1] if initial_manifests else None,
                         allow_custom_value=True, scale=4,
                     )
-                    lora_manifest_refresh_btn = gr.Button("🔄", scale=1)
+                    lora_manifest_refresh_btn = gr.Button("更新", scale=1)
 
                 # ── 実行名・保存先 ──
                 with gr.Row():
@@ -3430,7 +3147,7 @@ def build_ui(args: argparse.Namespace) -> gr.Blocks:
                     )
 
                 # ── LoRA設定 ──
-                with gr.Accordion("🔧 LoRA設定", open=True):
+                with gr.Accordion("LoRA設定", open=True):
                     with gr.Row():
                         lora_rank = gr.Slider(label="LoRAランク", minimum=1, maximum=128, value=16, step=1)
                         lora_alpha = gr.Number(label="lora_alpha", value=32.0)
@@ -3442,7 +3159,7 @@ def build_ui(args: argparse.Namespace) -> gr.Blocks:
                     )
 
                 # ── Resume設定 ──
-                with gr.Accordion("🔄 Resume設定", open=False):
+                with gr.Accordion("Resume設定", open=False):
                     lora_resume_enabled = gr.Checkbox(label="Resume（既存LoRAから再開）", value=False)
                     with gr.Row():
                         lora_resume_path = gr.Dropdown(
@@ -3450,7 +3167,7 @@ def build_ui(args: argparse.Namespace) -> gr.Blocks:
                             choices=_scan_lora_adapters(),
                             value=None, allow_custom_value=True, scale=4,
                         )
-                        lora_resume_refresh_btn = gr.Button("🔄", scale=1)
+                        lora_resume_refresh_btn = gr.Button("更新", scale=1)
                     lora_resume_warning = gr.Markdown(visible=False)
 
                     def _on_lora_resume_path_change(path):
@@ -3474,7 +3191,7 @@ def build_ui(args: argparse.Namespace) -> gr.Blocks:
                     )
 
                 # ── 学習パラメータ ──
-                with gr.Accordion("⚙️ 学習パラメータ", open=True):
+                with gr.Accordion("学習パラメータ", open=True):
                     with gr.Row():
                         lora_batch_size = gr.Slider(label="バッチサイズ", minimum=1, maximum=32, value=4, step=1)
                         lora_grad_accum = gr.Slider(label="勾配蓄積ステップ", minimum=1, maximum=16, value=1, step=1)
@@ -3494,26 +3211,26 @@ def build_ui(args: argparse.Namespace) -> gr.Blocks:
                         lora_log_every = gr.Number(label="ログ間隔", value=10, precision=0)
 
                 # ── EMA設定 ──
-                with gr.Accordion("📊 EMA設定", open=False):
+                with gr.Accordion("EMA設定", open=False):
                     with gr.Row():
                         lora_use_ema = gr.Checkbox(label="EMAを有効化", value=True)
                         lora_ema_decay = gr.Number(label="EMA減衰率", value=0.9999)
 
                 # ── バリデーション設定 ──
-                with gr.Accordion("✅ バリデーション設定", open=False):
+                with gr.Accordion("バリデーション設定", open=False):
                     with gr.Row():
                         lora_valid_ratio = gr.Slider(label="バリデーション分割比率", minimum=0.0, maximum=0.5, value=0.0, step=0.01)
                         lora_valid_every = gr.Number(label="バリデーション実行間隔", value=100, precision=0)
 
                 # ── Early Stopping ──
-                with gr.Accordion("🛑 Early Stopping設定", open=False):
+                with gr.Accordion("Early Stopping設定", open=False):
                     with gr.Row():
                         lora_early_stopping = gr.Checkbox(label="Early Stoppingを有効化", value=False)
                         lora_es_patience = gr.Number(label="パティエンス", value=3, precision=0)
                         lora_es_min_delta = gr.Number(label="最小悪化量", value=0.01)
 
                 # ── W&B設定 ──
-                with gr.Accordion("📈 W&B設定", open=False):
+                with gr.Accordion("W&B設定", open=False):
                     with gr.Row():
                         lora_wandb_enabled = gr.Checkbox(label="W&Bを有効化", value=False)
                         lora_wandb_project = gr.Textbox(label="W&Bプロジェクト名", value="")
@@ -3521,18 +3238,18 @@ def build_ui(args: argparse.Namespace) -> gr.Blocks:
 
                 lora_seed = gr.Number(label="乱数シード", value=0, precision=0)
 
-                gr.Markdown("### 📋 実行コマンドプレビュー")
+                gr.Markdown("### 実行コマンドプレビュー")
                 lora_cmd_preview = gr.Textbox(label="コマンドライン（確認用）", interactive=False, lines=3)
 
                 with gr.Row():
-                    lora_start_btn = gr.Button("▶️ LoRA学習開始", variant="primary", size="lg")
-                    lora_stop_btn = gr.Button("⏹️ 停止", variant="stop")
+                    lora_start_btn = gr.Button("LoRA学習開始", variant="primary", size="lg")
+                    lora_stop_btn = gr.Button("停止", variant="stop")
                 lora_train_status = gr.Textbox(label="実行状況", interactive=False, lines=2)
 
-                gr.Markdown("### 📋 学習ログ")
+                gr.Markdown("### 学習ログ")
                 with gr.Row():
                     lora_log_interval = gr.Slider(label="自動更新間隔（秒）", minimum=2, maximum=60, value=5, step=1, scale=3)
-                    lora_log_refresh_btn = gr.Button("🔄 手動更新", scale=1)
+                    lora_log_refresh_btn = gr.Button("手動更新", scale=1)
                 lora_log_text = gr.Textbox(label="LoRA学習ログ（末尾200行）", interactive=False, lines=15, max_lines=15)
 
                 # ── イベント配線 ──
@@ -3627,7 +3344,7 @@ def build_ui(args: argparse.Namespace) -> gr.Blocks:
                     value="パイプライン（スライス→キャプション）",
                 )
 
-                with gr.Accordion("✂️ スライス設定", open=True) as slice_accordion:
+                with gr.Accordion("スライス設定", open=True) as slice_accordion:
                     gr.Markdown("*Silero VAD（ニューラルネット音声活動検出）で発話区間を検出してスライスします。連続発話・キャラクター音声に対応。*")
                     with gr.Row():
                         ds_input = gr.Textbox(
@@ -3659,7 +3376,7 @@ def build_ui(args: argparse.Namespace) -> gr.Blocks:
                         ds_target_sr_enabled = gr.Checkbox(label="リサンプルを有効化", value=False)
                         ds_target_sr         = gr.Number(label="リサンプル先サンプリングレート（Hz）", value=44100, precision=0)
 
-                with gr.Accordion("🗣️ キャプション設定", open=True) as caption_accordion:
+                with gr.Accordion("キャプション設定", open=True) as caption_accordion:
                     gr.Markdown("*faster-whisper で音声を文字起こしします。精度重視設定（large-v3 + beam=5）がデフォルトです。*")
                     ds_caption_input = gr.Textbox(
                         label="キャプション対象フォルダ（キャプションのみモード時に使用）",
@@ -3698,7 +3415,7 @@ def build_ui(args: argparse.Namespace) -> gr.Blocks:
                         info="モデルが存在しない場合は自動ダウンロードされます。空欄にするとHFデフォルト (~/.cache/huggingface/hub) に保存されます。",
                     )
 
-                with gr.Accordion("🎭 絵文字キャプション設定（オプション）", open=False):
+                with gr.Accordion("絵文字キャプション設定（オプション）", open=False):
                     gr.Markdown(
                         "有効にすると、Whisperキャプション完了後に音響特徴量とLLMを使って"
                         "**Irodori-TTS互換の絵文字キャプション**を自動生成します。\n\n"
@@ -3707,7 +3424,7 @@ def build_ui(args: argparse.Namespace) -> gr.Blocks:
                     )
                     with gr.Row():
                         ec_enabled = gr.Checkbox(
-                            label="🎭 絵文字キャプションを有効にする",
+                            label="絵文字キャプションを有効にする",
                             value=False,
                             scale=1,
                             info="チェックを入れると通常キャプション完了後に絵文字キャプションを続けて実行します。",
@@ -3745,7 +3462,7 @@ def build_ui(args: argparse.Namespace) -> gr.Blocks:
                     ec_enabled.change(_ec_on_enabled, inputs=[ec_enabled], outputs=[ec_api])
                     ec_api.change(_ec_on_api_change, inputs=[ec_api], outputs=[ec_api_key])
 
-                with gr.Accordion("📄 Manifest出力設定", open=True):
+                with gr.Accordion("Manifest出力設定", open=True):
                     with gr.Row():
                         ds_manifest_output_dir = gr.Textbox(
                             label="manifest保存先フォルダ",
@@ -3765,25 +3482,25 @@ def build_ui(args: argparse.Namespace) -> gr.Blocks:
                             scale=1,
                         )
                     gr.Markdown(
-                        "📌 **フォーマット補足**\n"
+                        "**フォーマット補足**\n"
                         "- **CSV**: `audio_path,text,speaker_id` — Excelや各種ツールで開きやすい汎用形式\n"
                         "- **JSONL**: `{\"text\":\"...\",\"audio_path\":\"...\"}` — `prepare_manifest.py` への入力前段として使用可能"
                     )
 
-                gr.Markdown("### 📋 実行コマンドプレビュー")
+                gr.Markdown("### 実行コマンドプレビュー")
                 ds_cmd_preview = gr.Textbox(label="コマンドライン（確認用）", interactive=False, lines=3)
 
                 with gr.Row():
-                    ds_start_btn = gr.Button("▶️ 実行", variant="primary", size="lg")
-                    ds_stop_btn  = gr.Button("⏹️ 停止", variant="stop")
+                    ds_start_btn = gr.Button("実行", variant="primary", size="lg")
+                    ds_stop_btn  = gr.Button("停止", variant="stop")
                 ds_status = gr.Textbox(label="実行状況", interactive=False, lines=2)
 
-                gr.Markdown("### 📋 実行ログ")
+                gr.Markdown("### 実行ログ")
                 with gr.Row():
                     ds_log_interval = gr.Slider(
                         label="自動更新間隔（秒）", minimum=2, maximum=30, value=3, step=1, scale=3,
                     )
-                    ds_log_refresh_btn = gr.Button("🔄 手動更新", scale=1)
+                    ds_log_refresh_btn = gr.Button("手動更新", scale=1)
                 ds_log_text = gr.Textbox(
                     label="ログ出力", interactive=False, lines=20, max_lines=20,
                     elem_id="ds_log_text",
@@ -3870,7 +3587,7 @@ def build_ui(args: argparse.Namespace) -> gr.Blocks:
                                     _run_emoji_caption_inline(csv_path, wav_dir_, ec_api_, ec_api_key_)
 
                             threading.Thread(target=_wait_and_emoji, daemon=True).start()
-                            status += f"\n🎭 絵文字キャプション: 通常処理完了後に自動実行します（API: {ec_api_}）"
+                            status += f"\n絵文字キャプション: 通常処理完了後に自動実行します（API: {ec_api_}）"
 
                     return status, cmd
 
@@ -3896,7 +3613,7 @@ def build_ui(args: argparse.Namespace) -> gr.Blocks:
             # タブ6: チェックポイント変換
             # ═══════════════════════════════════════════════════════════════
             with gr.Tab("🔄 チェックポイント変換"):
-                with gr.Tab("📦 通常チェックポイント変換"):
+                with gr.Tab("通常チェックポイント変換"):
                     gr.Markdown(
                         "## .pt → .safetensors 変換\n"
                         "学習チェックポイント（`.pt`）を推論用の `.safetensors` 形式に変換します。\n"
@@ -3910,9 +3627,9 @@ def build_ui(args: argparse.Namespace) -> gr.Blocks:
                             value=initial_train_ckpts[-1] if initial_train_ckpts else None,
                             allow_custom_value=True, scale=4,
                         )
-                        conv_refresh_btn = gr.Button("🔄 更新", scale=1)
+                        conv_refresh_btn = gr.Button("更新", scale=1)
 
-                    conv_btn    = gr.Button("⚙️ 変換実行", variant="primary", size="lg")
+                    conv_btn    = gr.Button("変換実行", variant="primary", size="lg")
                     conv_status = gr.Textbox(label="変換結果", interactive=False, lines=6)
 
                     conv_refresh_btn.click(
@@ -3935,10 +3652,10 @@ def build_ui(args: argparse.Namespace) -> gr.Blocks:
                             value=(_scan_lora_full_adapters() or [None])[-1],
                             allow_custom_value=True, scale=4,
                         )
-                        lora_conv_refresh_btn = gr.Button("🔄 更新", scale=1)
+                        lora_conv_refresh_btn = gr.Button("更新", scale=1)
 
                     lora_conv_force = gr.Checkbox(label="既存の出力を上書き (--force)", value=False)
-                    lora_conv_btn = gr.Button("⚙️ LoRA変換実行", variant="primary", size="lg")
+                    lora_conv_btn = gr.Button("LoRA変換実行", variant="primary", size="lg")
                     lora_conv_status = gr.Textbox(label="変換結果", interactive=False, lines=8)
 
                     lora_conv_refresh_btn.click(
@@ -3971,7 +3688,7 @@ def build_ui(args: argparse.Namespace) -> gr.Blocks:
                         value=initial_merge_ckpts[-1] if initial_merge_ckpts else None,
                         allow_custom_value=True, scale=4,
                     )
-                    merge_refresh_a = gr.Button("🔄", scale=1)
+                    merge_refresh_a = gr.Button("更新", scale=1)
 
                 with gr.Row():
                     merge_ckpt_b = gr.Dropdown(
@@ -3980,9 +3697,9 @@ def build_ui(args: argparse.Namespace) -> gr.Blocks:
                         value=initial_merge_ckpts[0] if len(initial_merge_ckpts) > 1 else None,
                         allow_custom_value=True, scale=4,
                     )
-                    merge_refresh_b = gr.Button("🔄", scale=1)
+                    merge_refresh_b = gr.Button("更新", scale=1)
 
-                with gr.Accordion("⚙️ 基本マージ設定", open=True):
+                with gr.Accordion("基本マージ設定", open=True):
                     merge_method = gr.Dropdown(
                         label="マージ手法",
                         choices=["weighted_average", "slerp", "task_arithmetic"],
@@ -4016,14 +3733,14 @@ def build_ui(args: argparse.Namespace) -> gr.Blocks:
                                 value=default_base_path if default_base_path in initial_merge_ckpts else (initial_merge_ckpts[0] if initial_merge_ckpts else None),
                                 allow_custom_value=True, scale=4,
                             )
-                            merge_refresh_base = gr.Button("🔄", scale=1)
+                            merge_refresh_base = gr.Button("更新", scale=1)
 
                     def _on_method_change(method):
                         visible = method == "task_arithmetic"
                         return gr.update(visible=visible)
                     merge_method.change(_on_method_change, inputs=[merge_method], outputs=[ta_group])
 
-                with gr.Accordion("🧩 部分マージ（グループごとに手法を選択）", open=False):
+                with gr.Accordion("部分マージ（グループごとに手法を選択）", open=False):
                     gr.Markdown(
                         "有効にすると、レイヤーグループごとに異なるマージ手法を設定できます。\n"
                         "- **text**: テキストエンコーダ・TextBlock・JointAttentionのテキストKV\n"
@@ -4064,7 +3781,7 @@ def build_ui(args: argparse.Namespace) -> gr.Blocks:
                             pg_io_lam_a     = gr.Slider(minimum=0.0, maximum=1.0, value=0.5, step=0.01, label="λA")
                             pg_io_lam_b     = gr.Slider(minimum=0.0, maximum=1.0, value=0.5, step=0.01, label="λB")
 
-                with gr.Accordion("💉 LoRA的差分注入（オプション）", open=False):
+                with gr.Accordion("LoRA的差分注入（オプション）", open=False):
                     gr.Markdown(
                         "ベースモデルに対してドナーモデルの差分を指定スケールで注入します。\n"
                         "`result = base + scale × (donor − base)`\n\n"
@@ -4079,7 +3796,7 @@ def build_ui(args: argparse.Namespace) -> gr.Blocks:
                             value=default_base_path if default_base_path in initial_merge_ckpts else (initial_merge_ckpts[0] if initial_merge_ckpts else None),
                             allow_custom_value=True, scale=4,
                         )
-                        lora_refresh_base = gr.Button("🔄", scale=1)
+                        lora_refresh_base = gr.Button("更新", scale=1)
 
                     with gr.Row():
                         lora_donor = gr.Dropdown(
@@ -4088,7 +3805,7 @@ def build_ui(args: argparse.Namespace) -> gr.Blocks:
                             value=initial_merge_ckpts[-1] if initial_merge_ckpts else None,
                             allow_custom_value=True, scale=4,
                         )
-                        lora_refresh_donor = gr.Button("🔄", scale=1)
+                        lora_refresh_donor = gr.Button("更新", scale=1)
 
                     lora_scale = gr.Slider(
                         label="注入スケール（0=ベースのみ、1=ドナーに完全置換）",
@@ -4102,7 +3819,7 @@ def build_ui(args: argparse.Namespace) -> gr.Blocks:
                         lora_grp_diffusion= gr.Checkbox(label="diffusion_core（拡散コア）", value=False)
                         lora_grp_io       = gr.Checkbox(label="io（入出力）",            value=False)
 
-                with gr.Accordion("💾 出力設定", open=True):
+                with gr.Accordion("出力設定", open=True):
                     with gr.Row():
                         merge_output_format = gr.Dropdown(
                             label="保存形式",
@@ -4118,7 +3835,7 @@ def build_ui(args: argparse.Namespace) -> gr.Blocks:
                             scale=3,
                         )
 
-                merge_run_btn = gr.Button("🔀 マージ実行", variant="primary", size="lg")
+                merge_run_btn = gr.Button("マージ実行", variant="primary", size="lg")
                 merge_status  = gr.Textbox(label="実行結果", interactive=False, lines=10)
 
                 def _rescan_merge():
@@ -4164,7 +3881,7 @@ def build_ui(args: argparse.Namespace) -> gr.Blocks:
                     # ─────────────────────────────────────────────────────
                     # サブタブ1: 通常LoRAマージ（アダプタ同士）
                     # ─────────────────────────────────────────────────────
-                    with gr.Tab("🔀 通常LoRAマージ"):
+                    with gr.Tab("通常LoRAマージ"):
                         gr.Markdown(
                             "## 通常LoRAマージ\n"
                             "LoRAアダプタ同士をマージして新しいLoRAアダプタを生成します。\n"
@@ -4180,7 +3897,7 @@ def build_ui(args: argparse.Namespace) -> gr.Blocks:
                                 allow_custom_value=True, scale=4,
                             )
                             ll_ver_a   = gr.Textbox(label="バージョン", interactive=False, scale=1, max_lines=1)
-                            ll_ref_a   = gr.Button("🔄", scale=1)
+                            ll_ref_a   = gr.Button("更新", scale=1)
 
                         with gr.Row():
                             ll_adapter_b = gr.Dropdown(
@@ -4190,9 +3907,9 @@ def build_ui(args: argparse.Namespace) -> gr.Blocks:
                                 allow_custom_value=True, scale=4,
                             )
                             ll_ver_b   = gr.Textbox(label="バージョン", interactive=False, scale=1, max_lines=1)
-                            ll_ref_b   = gr.Button("🔄", scale=1)
+                            ll_ref_b   = gr.Button("更新", scale=1)
 
-                        with gr.Accordion("⚙️ マージ設定", open=True):
+                        with gr.Accordion("マージ設定", open=True):
                             ll_method = gr.Dropdown(
                                 label="マージ手法",
                                 choices=["weighted_average", "slerp", "task_arithmetic"],
@@ -4213,9 +3930,9 @@ def build_ui(args: argparse.Namespace) -> gr.Blocks:
                                         value="（なし）",
                                         allow_custom_value=True, scale=4,
                                     )
-                                    ll_ref_base = gr.Button("🔄", scale=1)
+                                    ll_ref_base = gr.Button("更新", scale=1)
 
-                        with gr.Accordion("🧩 部分マージ（グループ別手法）", open=False):
+                        with gr.Accordion("部分マージ（グループ別手法）", open=False):
                             gr.Markdown(
                                 "有効にすると、レイヤーグループごとに異なる手法でマージできます。\n"
                                 "上の「マージ設定」より優先されます。"
@@ -4248,14 +3965,14 @@ def build_ui(args: argparse.Namespace) -> gr.Blocks:
                                     ll_pg_io_la  = gr.Slider(minimum=0.0, maximum=1.0, value=0.5, step=0.01, label="λA")
                                     ll_pg_io_lb  = gr.Slider(minimum=0.0, maximum=1.0, value=0.5, step=0.01, label="λB")
 
-                        with gr.Accordion("💾 出力設定", open=True):
+                        with gr.Accordion("出力設定", open=True):
                             ll_output_dir = gr.Textbox(
                                 label="保存先フォルダ（空欄=" + str(cnf.LORA_DIR) + "/lora_merged_*/）",
                                 value="",
                                 placeholder=str(cnf.LORA_DIR / "lora_merged_*"),
                             )
 
-                        ll_run_btn = gr.Button("🔀 LoRAマージ実行", variant="primary", size="lg")
+                        ll_run_btn = gr.Button("LoRAマージ実行", variant="primary", size="lg")
                         ll_status  = gr.Textbox(label="実行結果", interactive=False, lines=10)
 
                         # ── イベント ──
@@ -4344,7 +4061,7 @@ def build_ui(args: argparse.Namespace) -> gr.Blocks:
                     # ─────────────────────────────────────────────────────
                     # サブタブ2: 本体モデルマージ（焼き込み）
                     # ─────────────────────────────────────────────────────
-                    with gr.Tab("🔥 本体モデルマージ（焼き込み）"):
+                    with gr.Tab("本体モデルマージ（焼き込み）"):
                         gr.Markdown(
                             "## 本体モデルマージ（焼き込み）\n"
                             "LoRAアダプタをベースモデルに焼き込み、マージ済みモデルを生成します。\n\n"
@@ -4358,9 +4075,9 @@ def build_ui(args: argparse.Namespace) -> gr.Blocks:
                                 value=default_lm_base if default_lm_base in initial_lm_ckpts else (initial_lm_ckpts[-1] if initial_lm_ckpts else None),
                                 allow_custom_value=True, scale=4,
                             )
-                            lm_refresh_base = gr.Button("🔄", scale=1)
+                            lm_refresh_base = gr.Button("更新", scale=1)
 
-                        with gr.Accordion("🅰️ アダプタA（必須）", open=True):
+                        with gr.Accordion("アダプタA（必須）", open=True):
                             with gr.Row():
                                 lm_adapter_a1 = gr.Dropdown(
                                     label="アダプタA-1",
@@ -4370,7 +4087,7 @@ def build_ui(args: argparse.Namespace) -> gr.Blocks:
                                 )
                                 lm_scale_a1 = gr.Slider(label="scale", minimum=0.0, maximum=2.0, value=1.0, step=0.05, scale=2)
                                 lm_ver_a1   = gr.Textbox(label="バージョン", interactive=False, scale=1, max_lines=1)
-                                lm_ref_a1   = gr.Button("🔄", scale=1)
+                                lm_ref_a1   = gr.Button("更新", scale=1)
                             with gr.Row():
                                 lm_adapter_a2 = gr.Dropdown(
                                     label="アダプタA-2（省略可）",
@@ -4380,7 +4097,7 @@ def build_ui(args: argparse.Namespace) -> gr.Blocks:
                                 )
                                 lm_scale_a2 = gr.Slider(label="scale", minimum=0.0, maximum=2.0, value=1.0, step=0.05, scale=2)
                                 lm_ver_a2   = gr.Textbox(label="バージョン", interactive=False, scale=1, max_lines=1)
-                                lm_ref_a2   = gr.Button("🔄", scale=1)
+                                lm_ref_a2   = gr.Button("更新", scale=1)
                             with gr.Accordion("🧩 部分焼き込みA", open=False):
                                 lm_use_pbake_a = gr.Checkbox(label="部分焼き込みAを有効にする", value=False)
                                 with gr.Row():
@@ -4389,7 +4106,7 @@ def build_ui(args: argparse.Namespace) -> gr.Blocks:
                                     lm_pbake_a_diff  = gr.Checkbox(label="diffusion_core", value=True)
                                     lm_pbake_a_io    = gr.Checkbox(label="io",             value=True)
 
-                        with gr.Accordion("🔀 焼き込み後マージ（オプション）", open=False):
+                        with gr.Accordion("焼き込み後マージ（オプション）", open=False):
                             lm_post_method = gr.Dropdown(
                                 label="マージ手法",
                                 choices=["none", "weighted_average", "slerp", "task_arithmetic"],
@@ -4409,7 +4126,7 @@ def build_ui(args: argparse.Namespace) -> gr.Blocks:
                                         value="（省略）",
                                         allow_custom_value=True, scale=4,
                                     )
-                                    lm_ref_post_base = gr.Button("🔄", scale=1)
+                                    lm_ref_post_base = gr.Button("更新", scale=1)
 
                             with gr.Group() as lm_adp_b_group:
                                 gr.Markdown("**アダプタB**")
@@ -4422,7 +4139,7 @@ def build_ui(args: argparse.Namespace) -> gr.Blocks:
                                     )
                                     lm_scale_b1 = gr.Slider(label="scale", minimum=0.0, maximum=2.0, value=1.0, step=0.05, scale=2)
                                     lm_ver_b1   = gr.Textbox(label="バージョン", interactive=False, scale=1, max_lines=1)
-                                    lm_ref_b1   = gr.Button("🔄", scale=1)
+                                    lm_ref_b1   = gr.Button("更新", scale=1)
                                 with gr.Row():
                                     lm_adapter_b2 = gr.Dropdown(
                                         label="アダプタB-2（省略可）",
@@ -4432,8 +4149,8 @@ def build_ui(args: argparse.Namespace) -> gr.Blocks:
                                     )
                                     lm_scale_b2 = gr.Slider(label="scale", minimum=0.0, maximum=2.0, value=1.0, step=0.05, scale=2)
                                     lm_ver_b2   = gr.Textbox(label="バージョン", interactive=False, scale=1, max_lines=1)
-                                    lm_ref_b2   = gr.Button("🔄", scale=1)
-                                with gr.Accordion("🧩 部分焼き込みB", open=False):
+                                    lm_ref_b2   = gr.Button("更新", scale=1)
+                                with gr.Accordion("部分焼き込みB", open=False):
                                     lm_use_pbake_b = gr.Checkbox(label="部分焼き込みBを有効にする", value=False)
                                     with gr.Row():
                                         lm_pbake_b_text = gr.Checkbox(label="text",           value=True)
@@ -4441,7 +4158,7 @@ def build_ui(args: argparse.Namespace) -> gr.Blocks:
                                         lm_pbake_b_diff = gr.Checkbox(label="diffusion_core", value=True)
                                         lm_pbake_b_io   = gr.Checkbox(label="io",             value=True)
 
-                            with gr.Accordion("🧩 部分マージ（焼き込み後・グループ別）", open=False):
+                            with gr.Accordion("部分マージ（焼き込み後・グループ別）", open=False):
                                 lm_use_partial = gr.Checkbox(label="部分マージを有効にする", value=False)
                                 _lm_mc = ["weighted_average", "slerp", "task_arithmetic"]
                                 with gr.Group():
@@ -4470,7 +4187,7 @@ def build_ui(args: argparse.Namespace) -> gr.Blocks:
                                         lm_pg_io_la  = gr.Slider(minimum=0.0, maximum=1.0, value=0.5, step=0.01, label="λA")
                                         lm_pg_io_lb  = gr.Slider(minimum=0.0, maximum=1.0, value=0.5, step=0.01, label="λB")
 
-                        with gr.Accordion("💾 出力設定", open=True):
+                        with gr.Accordion("出力設定", open=True):
                             with gr.Row():
                                 lm_output_format = gr.Dropdown(
                                     label="保存形式",
@@ -4485,7 +4202,7 @@ def build_ui(args: argparse.Namespace) -> gr.Blocks:
                                     scale=3,
                                 )
 
-                        lm_run_btn = gr.Button("🔥 焼き込みマージ実行", variant="primary", size="lg")
+                        lm_run_btn = gr.Button("焼き込みマージ実行", variant="primary", size="lg")
                         lm_status  = gr.Textbox(label="実行結果", interactive=False, lines=12)
 
                         # ── イベント ──
@@ -4645,8 +4362,6 @@ def main() -> None:
         debug=bool(args.debug),
         allowed_paths=allowed_paths,
         # theme=gr.themes.Soft(),
-        # css=_DARK_CSS,
-        # js=_DARK_JS,
     )
 
 
