@@ -675,8 +675,6 @@ def _clear_runtime_cache() -> str:
 def _clear_runtime_cache_ui():
     return (
         _clear_runtime_cache(),
-        gr.update(visible=False, open=False),
-        gr.update(visible=True, open=False),
     )
 
 def _run_generation(
@@ -2207,7 +2205,7 @@ def build_ui(args: argparse.Namespace) -> gr.Blocks:
     # ダークモードCSS/JSはモジュールトップレベル (_DARK_CSS/_DARK_JS) で定義
 
     with gr.Blocks(title="Irodori-TTS GUI") as demo:
-        gr.Markdown("# 🎙️ Irodori-TTS GUI")
+        gr.Markdown("# Irodori-TTS GUI")
 
         with gr.Tabs():
 
@@ -2285,7 +2283,7 @@ def build_ui(args: argparse.Namespace) -> gr.Blocks:
 
                 gr.Markdown("## 音声生成")
 
-                with gr.Accordion("🎤 参照音声（省略するとno-referenceモードで生成）", open=False) as infer_ref_accordion:
+                with gr.Accordion("🎤 参照音声 | Voice Design", open=False):
                     # スピーカーライブラリ選択時のref_latentパスを保持する隠しフィールド
                     spk_ref_latent_path = gr.Textbox(visible=False, value="")
 
@@ -2379,6 +2377,24 @@ def build_ui(args: argparse.Namespace) -> gr.Blocks:
                                 lambda: gr.Dropdown(choices=_scan_speakers()),
                                 outputs=[spk_select],
                             )
+                        # ── タブ4: Voice Design ─────────────────────────
+                        with gr.Tab("🎨 Voice Design Caption"):
+                            caption_input_vd = gr.Textbox(
+                                label="Caption (Voice Design)",
+                                value="",
+                                lines=2,
+                                placeholder="e.g. calm, bright, energetic, whispering",
+                                info="VoiceDesign 対応モデル読み込み時のみ有効",
+                            )
+                            with gr.Row():
+                                cfg_scale_caption = gr.Slider(
+                                    label="Caption CFG Scale",
+                                    minimum=0.0, maximum=10.0, value=3.0, step=0.1,
+                                )
+                                max_caption_len_raw = gr.Textbox(
+                                    label="Max Caption Len (optional)",
+                                    value="",
+                                )
 
                 # ── 感情スタイルプリセット ──────────────────────────────
                 with gr.Accordion("🎭 感情スタイル", open=True):
@@ -2536,40 +2552,26 @@ def build_ui(args: argparse.Namespace) -> gr.Blocks:
                         outputs=[silence_sec],
                     )
 
-                # ── 候補数設定 ──────────────────────────────────────────
-                num_candidates = gr.Slider(
-                    label="生成候補数 (Num Candidates)",
-                    minimum=1, maximum=8, value=1, step=1,
-                    info="1回の生成で作成する候補音声の数。シード指定時は seed, seed+1, seed+2... が使われます。改行分割モード時は1固定。",
-                )
+                with gr.Row():
+                    # ── 候補数設定 ──────────────────────────────────────────
+                    num_candidates = gr.Slider(
+                        label="生成候補数 (Num Candidates)",
+                        minimum=1, maximum=8, value=1, step=1,
+                        scale=4,
+                        info="1回の生成で作成する数。シード指定時は seed, seed+1, seed+2...。改行分割モード時は1固定。",
+                    )
+                    # ── ファイル名 ──────────────────────────────────────────
+                    filename_prefix = gr.Textbox(
+                        label="File name prefix",
+                        value=args.output_prefix,
+                        scale=4,
+                        info="If left blank, use the model name.",
+                    )
 
                 # ── テキスト入力（生成ボタン直上） ─────────────────────
                 infer_text = gr.Textbox(label="テキスト（合成したい文章）", lines=4)
-                with gr.Accordion("🎨 Caption (Voice Design)", open=False, visible=False) as caption_vd_accordion:
-                    caption_input_vd = gr.Textbox(
-                        label="Caption (Voice Design)",
-                        value="",
-                        lines=2,
-                        placeholder="e.g. calm, bright, energetic, whispering",
-                        info="VoiceDesign モデル読み込み時のみ表示されます。",
-                    )
-                    with gr.Row():
-                        cfg_scale_caption = gr.Slider(
-                            label="Caption CFG Scale",
-                            minimum=0.0, maximum=10.0, value=3.0, step=0.1,
-                        )
-                        max_caption_len_raw = gr.Textbox(
-                            label="Max Caption Len (optional)",
-                            value="",
-                        )
-
-                filename_prefix = gr.Textbox(
-                    label="File name prefix (If left blank, use the model name)",
-                    value=args.output_prefix,
-                    scale=4,
-                )
                 
-                generate_btn = gr.Button("🎵 生成", variant="primary", size="lg")
+                generate_btn = gr.Button("生成", variant="primary", size="lg")
 
                 # ── 候補リスト（最大8候補）──────────────────────────
                 _MAX_CANDIDATES = 8
@@ -2743,8 +2745,6 @@ def build_ui(args: argparse.Namespace) -> gr.Blocks:
                         status_text,
                         gr.Dropdown(value=auto_codec),
                         gr.Textbox(value=compat_msg),
-                        gr.update(visible=voice_design_enabled, open=voice_design_enabled),
-                        gr.update(visible=not voice_design_enabled, open=False),
                     )
 
                 load_model_btn.click(
@@ -2752,9 +2752,9 @@ def build_ui(args: argparse.Namespace) -> gr.Blocks:
                     inputs=[infer_checkpoint, model_device, model_precision,
                             codec_device, codec_precision, enable_watermark,
                             infer_lora_adapter, infer_lora_adapter],
-                    outputs=[model_status, infer_codec_repo, infer_lora_compat_status, caption_vd_accordion, infer_ref_accordion],
+                    outputs=[model_status, infer_codec_repo, infer_lora_compat_status],
                 )
-                unload_model_btn.click(_clear_runtime_cache_ui, outputs=[model_status, caption_vd_accordion, infer_ref_accordion])
+                unload_model_btn.click(_clear_runtime_cache_ui, outputs=[model_status])
                 _ui_outputs = _cand_labels + _cand_audios + [out_log, out_timing]
                 generate_btn.click(_run_generation_ui,
                     inputs=[
