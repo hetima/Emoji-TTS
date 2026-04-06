@@ -19,15 +19,13 @@ from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 from typing import Any
-
 import torch
+
+import gradio_conf as cnf
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 定数
 # ─────────────────────────────────────────────────────────────────────────────
-
-BASE_DIR        = Path(__file__).resolve().parent
-CHECKPOINTS_DIR = BASE_DIR / "checkpoints"
 
 # safetensors メタデータキー（convert_checkpoint_to_safetensors.py と統一）
 CONFIG_META_KEY = "config_json"
@@ -44,7 +42,7 @@ ARCH_CRITICAL_KEYS = {
 SLERP_NORM_THRESHOLD = 1e-6
 
 # Task Arithmetic デフォルトベースモデルパス
-DEFAULT_BASE_PATH = CHECKPOINTS_DIR / "Aratako_Irodori-TTS-500M" / "model.safetensors"
+DEFAULT_BASE_PATH = cnf.CHECKPOINTS_DIR / "Aratako_Irodori-TTS-500M" / "model.safetensors"
 
 # 部分マージ グループ定義（キープレフィックス）
 LAYER_GROUPS: dict[str, list[str]] = {
@@ -507,7 +505,7 @@ def run_merge(
             model_config = cfg_base
 
             suffix = ".safetensors" if output_format == "safetensors" else ".pt"
-            out_dir = Path(output_dir) if output_dir else CHECKPOINTS_DIR / "merged"
+            out_dir = Path(output_dir) if output_dir else cnf.CHECKPOINTS_DIR / "merged"
             out_path = out_dir / _make_output_filename("lora_inject", suffix)
             save_merged(weights, model_config, out_path)
             logs.append(f"✅ LoRA注入完了 → {out_path}")
@@ -601,7 +599,7 @@ def run_merge(
 
         # 保存
         suffix = ".safetensors" if output_format == "safetensors" else ".pt"
-        out_dir = Path(output_dir) if output_dir else CHECKPOINTS_DIR / "merged"
+        out_dir = Path(output_dir) if output_dir else cnf.CHECKPOINTS_DIR / "merged"
         out_path = out_dir / _make_output_filename(method_label, suffix)
         save_merged(weights, cfg_a, out_path)
 
@@ -621,14 +619,14 @@ def run_merge(
 
 def scan_checkpoints_for_merge() -> list[str]:
     """checkpoints/ 配下の .pt / .safetensors を列挙（codecs・tokenizers 除外）。"""
-    CHECKPOINTS_DIR.mkdir(parents=True, exist_ok=True)
+    cnf.CHECKPOINTS_DIR.mkdir(parents=True, exist_ok=True)
     candidates = sorted([
-        *CHECKPOINTS_DIR.glob("**/*.pt"),
-        *CHECKPOINTS_DIR.glob("**/*.safetensors"),
+        *cnf.CHECKPOINTS_DIR.glob("**/*.pt"),
+        *cnf.CHECKPOINTS_DIR.glob("**/*.safetensors"),
     ])
     result = []
     for p in candidates:
-        parts = p.relative_to(CHECKPOINTS_DIR).parts
+        parts = p.relative_to(cnf.CHECKPOINTS_DIR).parts
         if parts[0] in {"codecs", "tokenizers"}:
             continue
         result.append(str(p))

@@ -30,7 +30,6 @@ import torch
 
 # merge.py の共通ユーティリティを流用
 from merge import (
-    CHECKPOINTS_DIR,
     LAYER_GROUPS,
     _load_weights,
     _load_model_config,
@@ -45,6 +44,9 @@ from merge import (
     _make_output_filename,
     _format_compat_error,
 )
+
+import gradio_conf as cnf
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 定数
@@ -702,10 +704,9 @@ def run_lora_lora_merge(
             )
 
         # 保存
-        lora_dir = Path(__file__).resolve().parent / "lora"
         out_dir = (
             Path(output_dir) if output_dir
-            else lora_dir / _make_lora_output_dirname(method_label)
+            else cnf.LORA_DIR / _make_lora_output_dirname(method_label)
         )
         logs.append(f"⏳ 保存中: {out_dir} ...")
         _save_lora_adapter(merged_wts, cfg_a, out_dir)
@@ -866,7 +867,7 @@ def run_lora_merge(
             logs.append("✅ LoRA焼き込み完了")
 
         suffix   = ".safetensors" if output_format == "safetensors" else ".pt"
-        out_dir  = Path(output_dir) if output_dir else CHECKPOINTS_DIR / "lora_merged"
+        out_dir  = Path(output_dir) if output_dir else cnf.CHECKPOINTS_DIR / "lora_merged"
         out_path = out_dir / _make_output_filename(method_label, suffix)
         logs.append(f"⏳ 保存中: {out_path} ...")
         save_merged(merged_weights, cfg_base, out_path)
@@ -886,7 +887,7 @@ def run_lora_merge(
 
 def scan_lora_adapters_for_merge() -> list[str]:
     """lora/ 配下のアダプタフォルダを列挙する。"""
-    lora_dir = Path(__file__).resolve().parent / "lora"
+    lora_dir = cnf.LORA_DIR
     lora_dir.mkdir(parents=True, exist_ok=True)
     result = []
     for p in sorted(lora_dir.rglob("adapter_config.json")):

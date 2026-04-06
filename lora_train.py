@@ -63,10 +63,12 @@ from train import (
     validate_text_backbone_dim,
 )
 
+import gradio_conf as cnf
+
 WANDB_MODES = {"online", "offline", "disabled"}
 
-# LoRAデフォルト出力先（このスクリプトと同階層の lora/ フォルダ）
-_DEFAULT_LORA_DIR = Path(__file__).resolve().parent / "lora"
+# LoRAデフォルト出力先
+_DEFAULT_LORA_DIR = cnf.LORA_DIR
 
 # pyファイル基準のcheckpointsフォルダ
 _PROJECT_CHECKPOINTS_DIR = Path(__file__).resolve().parent / "checkpoints"

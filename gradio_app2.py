@@ -15,6 +15,8 @@ from pathlib import Path
 import gradio as gr
 import yaml
 
+import gradio_conf as cnf
+
 # torch.nn.utils.weight_norm deprecation warning (from upstream deps) is noisy
 # but currently harmless for inference.
 warnings.filterwarnings(
@@ -56,26 +58,6 @@ from irodori_tts.inference_runtime import (
     save_wav,
 )
 
-# ─────────────────────────────────────────────────────────────────────────────
-# パス定数
-# ─────────────────────────────────────────────────────────────────────────────
-BASE_DIR         = Path(__file__).resolve().parent
-CHECKPOINTS_DIR  = BASE_DIR / "checkpoints"
-CONFIGS_DIR      = BASE_DIR / "configs"
-LOGS_DIR         = BASE_DIR / "logs"
-OUTPUTS_DIR      = BASE_DIR / "gradio_outputs"
-LORA_DIR         = BASE_DIR / "lora"
-DEFAULT_HF_REPO  = "Aratako/Irodori-TTS-500M-v2"
-DEFAULT_CONFIG   = "train_v2.yaml"
-DEFAULT_PREPARE_CODEC_REPO = "Aratako/Semantic-DACVAE-Japanese-32dim"
-PREPARE_CODEC_REPO_CHOICES = [
-    "Aratako/Semantic-DACVAE-Japanese-32dim",  # v2 (dim32)
-    "facebook/dacvae-watermarked",             # v1 (dim128)
-]
-FIXED_SECONDS    = 30.0
-DATASET_TOOLS    = BASE_DIR / "dataset_tools.py"
-DEFAULT_DATASET_DIR = BASE_DIR / "my_dataset"
-SPEAKERS_DIR        = BASE_DIR / "speakers"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # グローバルプロセス管理（学習・前処理の排他制御）
@@ -90,14 +72,14 @@ _active_log_path: Path | None = None
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _scan_checkpoints() -> list[str]:
-    CHECKPOINTS_DIR.mkdir(parents=True, exist_ok=True)
+    cnf.CHECKPOINTS_DIR.mkdir(parents=True, exist_ok=True)
     candidates = sorted([
-        *CHECKPOINTS_DIR.glob("**/*.pt"),
-        *CHECKPOINTS_DIR.glob("**/*.safetensors"),
+        *cnf.CHECKPOINTS_DIR.glob("**/*.pt"),
+        *cnf.CHECKPOINTS_DIR.glob("**/*.safetensors"),
     ])
     result = []
     for p in candidates:
-        parts = p.relative_to(CHECKPOINTS_DIR).parts
+        parts = p.relative_to(cnf.CHECKPOINTS_DIR).parts
         if parts[0] in {"codecs", "tokenizers"}:
             continue
         result.append(str(p))
@@ -105,18 +87,18 @@ def _scan_checkpoints() -> list[str]:
 
 
 def _scan_configs() -> list[str]:
-    CONFIGS_DIR.mkdir(parents=True, exist_ok=True)
-    return sorted(str(p) for p in CONFIGS_DIR.glob("*.yaml")) + \
-           sorted(str(p) for p in CONFIGS_DIR.glob("*.yml"))
+    cnf.CONFIGS_DIR.mkdir(parents=True, exist_ok=True)
+    return sorted(str(p) for p in cnf.CONFIGS_DIR.glob("*.yaml")) + \
+           sorted(str(p) for p in cnf.CONFIGS_DIR.glob("*.yml"))
 
 
 def _scan_manifests() -> list[str]:
-    return sorted(str(p) for p in BASE_DIR.glob("**/*.jsonl"))
+    return sorted(str(p) for p in cnf.BASE_DIR.glob("**/*.jsonl"))
 
 
 def _scan_train_checkpoints() -> list[str]:
     result = []
-    for p in BASE_DIR.glob("**/*.pt"):
+    for p in cnf.BASE_DIR.glob("**/*.pt"):
         if p.stat().st_size > 1024 * 1024:
             result.append(str(p))
     return sorted(result)
@@ -124,10 +106,10 @@ def _scan_train_checkpoints() -> list[str]:
 
 def _scan_lora_adapters() -> list[str]:
     """adapter_config.json と adapter_model.safetensors/.bin の両方が存在するフォルダを列挙。"""
-    LORA_DIR.mkdir(parents=True, exist_ok=True)
+    cnf.LORA_DIR.mkdir(parents=True, exist_ok=True)
     _ADAPTER_STATES = ("adapter_model.safetensors", "adapter_model.bin")
     result = []
-    for p in sorted(LORA_DIR.rglob("adapter_config.json")):
+    for p in sorted(cnf.LORA_DIR.rglob("adapter_config.json")):
         parent = p.parent
         if any((parent / s).is_file() for s in _ADAPTER_STATES):
             result.append(str(parent))
@@ -135,9 +117,9 @@ def _scan_lora_adapters() -> list[str]:
 
 
 def _scan_lora_full_adapters() -> list[str]:
-    LORA_DIR.mkdir(parents=True, exist_ok=True)
+    cnf.LORA_DIR.mkdir(parents=True, exist_ok=True)
     result = []
-    for p in sorted(LORA_DIR.rglob("adapter_config.json")):
+    for p in sorted(cnf.LORA_DIR.rglob("adapter_config.json")):
         if p.parent.name.endswith("_full"):
             result.append(str(p.parent))
     return result
@@ -149,9 +131,9 @@ def _scan_lora_full_adapters() -> list[str]:
 
 def _scan_speakers() -> list[str]:
     """speakers/ 配下のキャラクター名を列挙（ref.pt が存在するフォルダのみ）。"""
-    SPEAKERS_DIR.mkdir(parents=True, exist_ok=True)
+    cnf.SPEAKERS_DIR.mkdir(parents=True, exist_ok=True)
     return ["（使用しない）"] + sorted(
-        d.name for d in SPEAKERS_DIR.iterdir()
+        d.name for d in cnf.SPEAKERS_DIR.iterdir()
         if d.is_dir() and (d / "ref.pt").exists()
     )
 
@@ -242,7 +224,7 @@ def _run_create_speaker(
     except Exception as e:
         return f"エラー: DACVAEエンコード失敗: {e}"
 
-    out_dir = SPEAKERS_DIR / char_name
+    out_dir = cnf.SPEAKERS_DIR / char_name
     out_dir.mkdir(parents=True, exist_ok=True)
 
     shutil.copy2(wav_path, out_dir / "ref.wav")
@@ -276,9 +258,9 @@ def _run_create_speaker(
 
 def _scan_lora_configs() -> list[str]:
     """configs/ 配下のYAMLのうち 'lora' セクションを持つものを列挙。"""
-    CONFIGS_DIR.mkdir(parents=True, exist_ok=True)
+    cnf.CONFIGS_DIR.mkdir(parents=True, exist_ok=True)
     result = []
-    for p in sorted(CONFIGS_DIR.glob("*.yaml")) + sorted(CONFIGS_DIR.glob("*.yml")):
+    for p in sorted(cnf.CONFIGS_DIR.glob("*.yaml")) + sorted(cnf.CONFIGS_DIR.glob("*.yml")):
         try:
             data = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
             if "lora" in data:
@@ -335,12 +317,12 @@ def _lora_config_from_ui(
 
 
 def _save_lora_config(config_name: str, data: dict) -> str:
-    CONFIGS_DIR.mkdir(parents=True, exist_ok=True)
+    cnf.CONFIGS_DIR.mkdir(parents=True, exist_ok=True)
     p = Path(config_name)
     if not p.suffix:
         p = p.with_suffix(".yaml")
     if not p.is_absolute():
-        p = CONFIGS_DIR / p.name
+        p = cnf.CONFIGS_DIR / p.name
     with open(p, "w", encoding="utf-8") as f:
         yaml.dump(data, f, allow_unicode=True, default_flow_style=False, sort_keys=False)
     return f"保存しました: {p}"
@@ -513,14 +495,14 @@ def _validate_lora_compat_ui(lora_adapter: str) -> str:
 def _ensure_default_model() -> None:
     if _scan_checkpoints():
         return
-    print(f"[gradio] モデル未検出。{DEFAULT_HF_REPO} を自動ダウンロードします...", flush=True)
+    print(f"[gradio] モデル未検出。{cnf.DEFAULT_HF_REPO} を自動ダウンロードします...", flush=True)
     try:
         from huggingface_hub import hf_hub_download
-        safe_name = DEFAULT_HF_REPO.replace("/", "_")
-        local_dir = CHECKPOINTS_DIR / safe_name
+        safe_name = cnf.DEFAULT_HF_REPO.replace("/", "_")
+        local_dir = cnf.CHECKPOINTS_DIR / safe_name
         local_dir.mkdir(parents=True, exist_ok=True)
         downloaded = hf_hub_download(
-            repo_id=DEFAULT_HF_REPO,
+            repo_id=cnf.DEFAULT_HF_REPO,
             filename="model.safetensors",
             local_dir=str(local_dir),
         )
@@ -536,7 +518,7 @@ def _download_from_hf(repo_id_input: str) -> tuple[gr.Dropdown, str]:
     try:
         from huggingface_hub import hf_hub_download
         safe_name = repo_id.replace("/", "_")
-        local_dir = CHECKPOINTS_DIR / safe_name
+        local_dir = cnf.CHECKPOINTS_DIR / safe_name
         local_dir.mkdir(parents=True, exist_ok=True)
         dest = local_dir / "model.safetensors"
         if dest.is_file():
@@ -710,6 +692,7 @@ def _run_generation(
     num_candidates: int = 1,
     multiline_mode: str = "デフォルト",
     silence_sec: float = 0.1,
+    filename_prefix: str = "",
 ) -> tuple[list[tuple[str, str]], str, str]:
     def stdout_log(msg: str) -> None:
         print(msg, flush=True)
@@ -727,6 +710,9 @@ def _run_generation(
     )
     if str(text).strip() == "":
         raise ValueError("テキストを入力してください。")
+    
+    if not filename_prefix:
+        filename_prefix = Path(checkpoint).name.split("_")[0]
 
     cfg_scale        = _parse_optional_float(cfg_scale_raw, "cfg_scale")
     max_caption_len  = _parse_optional_int(max_caption_len_raw, "max_caption_len")
@@ -783,7 +769,7 @@ def _run_generation(
     _ver_str = f"{_ver_info[0]} (latent_dim={_ver_info[2]})" if _ver_info else "unknown"
     stdout_log(f"[gradio] model_version: {_ver_str}")
 
-    OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
+    cnf.OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
 
     gallery_items: list[tuple[str, str]] = []
     all_detail_lines: list[str] = [
@@ -800,7 +786,7 @@ def _run_generation(
         return runtime.synthesize(
             SamplingRequest(
                 text=str(line_text), ref_wav=ref_wav, ref_latent=ref_latent_path, no_ref=bool(no_ref),
-                seconds=FIXED_SECONDS, max_ref_seconds=30.0, max_text_len=None,
+                seconds=cnf.FIXED_SECONDS, max_ref_seconds=30.0, max_text_len=None,
                 caption=caption_value or None,
                 max_caption_len=max_caption_len,
                 num_steps=int(num_steps),
@@ -871,7 +857,7 @@ def _run_generation(
 
             stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
             out_path = save_wav(
-                OUTPUTS_DIR / f"sample_{stamp}_concat.wav",
+                cnf.OUTPUTS_DIR / f"{filename_prefix}_{stamp}_concat.wav",
                 concatenated,
                 sample_rate,
             )
@@ -885,7 +871,7 @@ def _run_generation(
             stamp_base = datetime.now().strftime("%Y%m%d_%H%M%S")
             for li, result in enumerate(line_results):
                 out_path = save_wav(
-                    OUTPUTS_DIR / f"sample_{stamp_base}_line{li + 1}.wav",
+                    cnf.OUTPUTS_DIR / f"{filename_prefix}_{stamp_base}_line{li + 1}.wav",
                     result.audio.float(),
                     result.sample_rate,
                 )
@@ -902,9 +888,9 @@ def _run_generation(
 
             result = _synthesize_line(str(text), candidate_seed)
 
-            stamp    = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+            stamp    = datetime.now().strftime("%Y%m%d_%H%M%S")
             out_path = save_wav(
-                OUTPUTS_DIR / f"sample_{stamp}_c{i + 1}.wav",
+                cnf.OUTPUTS_DIR / f"{filename_prefix}_{stamp}_c{i + 1}.wav",
                 result.audio.float(),
                 result.sample_rate,
             )
@@ -1029,7 +1015,7 @@ def _build_manifest_command(
         s = str(val).strip()
         return s if s else fallback
 
-    cmd = [sys.executable, str(BASE_DIR / "prepare_manifest.py")]
+    cmd = [sys.executable, str(cnf.BASE_DIR / "prepare_manifest.py")]
 
     if data_source_mode == "local_csv":
         csv_path = Path(_s(dataset))
@@ -1052,7 +1038,7 @@ def _build_manifest_command(
     elif mode == "model_v1":
         auto_codec_repo = "facebook/dacvae-watermarked"
     if not auto_codec_repo:
-        auto_codec_repo = DEFAULT_PREPARE_CODEC_REPO
+        auto_codec_repo = cnf.DEFAULT_PREPARE_CODEC_REPO
 
     cmd += [
         "--audio-column",    _s(audio_col, "audio"),
@@ -1097,9 +1083,9 @@ def _run_manifest(
         if _active_proc is not None and _active_proc.poll() is None:
             return "別のプロセスが実行中です。停止してから再実行してください。", cmd_str
 
-        LOGS_DIR.mkdir(parents=True, exist_ok=True)
+        cnf.LOGS_DIR.mkdir(parents=True, exist_ok=True)
         stamp    = datetime.now().strftime("%Y%m%d_%H%M%S")
-        log_path = LOGS_DIR / f"manifest_{stamp}.log"
+        log_path = cnf.LOGS_DIR / f"manifest_{stamp}.log"
         _active_log_path = log_path
 
         env = os.environ.copy()
@@ -1170,12 +1156,12 @@ def _load_yaml_config(config_path: str) -> dict:
 
 
 def _save_yaml_config(config_path: str, data: dict) -> str:
-    CONFIGS_DIR.mkdir(parents=True, exist_ok=True)
+    cnf.CONFIGS_DIR.mkdir(parents=True, exist_ok=True)
     p = Path(config_path)
     if not p.suffix:
         p = p.with_suffix(".yaml")
     if not p.is_absolute():
-        p = CONFIGS_DIR / p.name
+        p = cnf.CONFIGS_DIR / p.name
     with open(p, "w", encoding="utf-8") as f:
         yaml.dump(data, f, allow_unicode=True, default_flow_style=False, sort_keys=False)
     return f"保存しました: {p}"
@@ -1250,9 +1236,9 @@ def _build_train_command(
 ) -> list[str]:
     if int(num_gpus) > 1:
         cmd = [sys.executable, "-m", "torch.distributed.run",
-               f"--nproc_per_node={num_gpus}", str(BASE_DIR / "train.py")]
+               f"--nproc_per_node={num_gpus}", str(cnf.BASE_DIR / "train.py")]
     else:
-        cmd = [sys.executable, str(BASE_DIR / "train.py")]
+        cmd = [sys.executable, str(cnf.BASE_DIR / "train.py")]
 
     cmd += [
         "--config", str(config_path),
@@ -1292,8 +1278,8 @@ def _start_train(
             return "学習が既に実行中です。停止してから再実行してください。", ""
 
     cfg_data = _config_from_ui(*ui_cfg_args)
-    tmp_config = CONFIGS_DIR / "_train_tmp.yaml"
-    CONFIGS_DIR.mkdir(parents=True, exist_ok=True)
+    tmp_config = cnf.CONFIGS_DIR / "_train_tmp.yaml"
+    cnf.CONFIGS_DIR.mkdir(parents=True, exist_ok=True)
 
     base_cfg = _load_yaml_config(str(config_path)) if Path(config_path).is_file() else {}
     base_cfg.update(cfg_data)
@@ -1308,9 +1294,9 @@ def _start_train(
     )
     cmd = " ".join(cmd_list)
 
-    LOGS_DIR.mkdir(parents=True, exist_ok=True)
+    cnf.LOGS_DIR.mkdir(parents=True, exist_ok=True)
     stamp    = datetime.now().strftime("%Y%m%d_%H%M%S")
-    log_path = LOGS_DIR / f"train_{stamp}.log"
+    log_path = cnf.LOGS_DIR / f"train_{stamp}.log"
 
     _TRAIN_ETA_INFO.clear()
 
@@ -1473,7 +1459,7 @@ def _parse_train_log_metrics():
 def _write_tensorboard_events(log_path: Path) -> None:
     try:
         from torch.utils.tensorboard import SummaryWriter
-        tb_dir = LOGS_DIR / "tensorboard" / log_path.stem
+        tb_dir = cnf.LOGS_DIR / "tensorboard" / log_path.stem
         tb_dir.mkdir(parents=True, exist_ok=True)
         writer = SummaryWriter(log_dir=str(tb_dir))
         df = _parse_train_log_metrics()
@@ -1487,7 +1473,7 @@ def _write_tensorboard_events(log_path: Path) -> None:
     finally:
         df = _parse_train_log_metrics()
         if not df.empty:
-            csv_path = LOGS_DIR / f"{log_path.stem}_metrics.csv"
+            csv_path = cnf.LOGS_DIR / f"{log_path.stem}_metrics.csv"
             df.to_csv(csv_path, index=False)
             print(f"[gradio] メトリクスCSV保存: {csv_path}", flush=True)
 
@@ -1573,7 +1559,7 @@ def _run_convert(input_pt: str) -> str:
     p = Path(input_pt)
     if not p.is_file():
         return f"エラー: ファイルが見つかりません: {p}"
-    cmd = f"{sys.executable} {BASE_DIR / 'convert_checkpoint_to_safetensors.py'} {p}"
+    cmd = f"{sys.executable} {cnf.BASE_DIR / 'convert_checkpoint_to_safetensors.py'} {p}"
     try:
         result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=300)
         out = result.stdout + result.stderr
@@ -1624,7 +1610,7 @@ def _build_dataset_command(
     manifest_path = str(Path(manifest_output_dir) / f"{manifest_filename}.{fmt_ext}")
 
     if mode == "スライスのみ":
-        cmd = [sys.executable, str(DATASET_TOOLS), "slice",
+        cmd = [sys.executable, str(cnf.DATASET_TOOLS), "slice",
                "--input", input_path,
                "--output", slice_output,
                "--min-sec", str(min_sec),
@@ -1642,7 +1628,7 @@ def _build_dataset_command(
 
     elif mode == "キャプションのみ":
         lang = "" if language in ("自動検出", "auto", "") else language
-        cmd = [sys.executable, str(DATASET_TOOLS), "caption",
+        cmd = [sys.executable, str(cnf.DATASET_TOOLS), "caption",
                "--input", caption_input,
                "--output-manifest", manifest_path,
                "--format", fmt_ext,
@@ -1661,7 +1647,7 @@ def _build_dataset_command(
 
     else:
         lang = "" if language in ("自動検出", "auto", "") else language
-        cmd = [sys.executable, str(DATASET_TOOLS), "pipeline",
+        cmd = [sys.executable, str(cnf.DATASET_TOOLS), "pipeline",
                "--input", input_path,
                "--slice-output", slice_output,
                "--output-manifest", manifest_path,
@@ -1697,9 +1683,9 @@ def _start_dataset_job(*args) -> tuple[str, str]:
     cmd_list = _build_dataset_command(*args)
     cmd_str  = " ".join(cmd_list)
 
-    LOGS_DIR.mkdir(parents=True, exist_ok=True)
+    cnf.LOGS_DIR.mkdir(parents=True, exist_ok=True)
     stamp    = datetime.now().strftime("%Y%m%d_%H%M%S")
-    log_path = LOGS_DIR / f"dataset_{stamp}.log"
+    log_path = cnf.LOGS_DIR / f"dataset_{stamp}.log"
 
     with _DS_LOG_LOCK:
         _DS_LOG_PATH = log_path
@@ -1766,13 +1752,14 @@ _EMOJI_DEFAULT_MODELS = {
 }
 
 
-def _append_emoji_to_ds_log(log_path: Path, message: str) -> None:
-    try:
-        with open(log_path, "a", encoding="utf-8") as f:
-            f.write(message + "\n")
-            f.flush()
-    except Exception:
-        pass
+def _append_emoji_to_ds_log(log_path: Path|None, message: str) -> None:
+    if log_path != None:
+        try:
+            with open(log_path, "a", encoding="utf-8") as f:
+                f.write(message + "\n")
+                f.flush()
+        except Exception:
+            pass
 
 
 def _run_emoji_caption_inline(
@@ -1786,7 +1773,7 @@ def _run_emoji_caption_inline(
     api_key_str = _EMOJI_API_KEYS.get(api_label, "lm_studio")
 
     cmd = [
-        sys.executable, str(DATASET_TOOLS), "emoji_caption",
+        sys.executable, str(cnf.DATASET_TOOLS), "emoji_caption",
         "--csv",     str(csv_path).strip(),
         "--wav-dir", str(wav_dir).strip(),
         "--api",     api_key_str,
@@ -1839,7 +1826,7 @@ def _build_lora_train_command(
     wandb_enabled, wandb_project, wandb_run_name,
     seed,
 ) -> list[str]:
-    cmd = [sys.executable, str(BASE_DIR / "lora_train.py")]
+    cmd = [sys.executable, str(cnf.BASE_DIR / "lora_train.py")]
     cmd += ["--base-model", str(base_model)]
     cmd += ["--manifest", str(manifest)]
 
@@ -1922,9 +1909,9 @@ def _start_lora_train(*args) -> tuple[str, str]:
     except (IndexError, ValueError, TypeError):
         _max_steps = 0
 
-    LOGS_DIR.mkdir(parents=True, exist_ok=True)
+    cnf.LOGS_DIR.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    log_path = LOGS_DIR / f"lora_train_{stamp}.log"
+    log_path = cnf.LOGS_DIR / f"lora_train_{stamp}.log"
 
     _LORA_ETA_INFO.clear()
 
@@ -2065,7 +2052,7 @@ def _run_lora_convert(input_full_dir: str, force: bool = False) -> str:
     p = Path(input_full_dir)
     if not p.is_dir():
         return f"エラー: フォルダが存在しません: {p}"
-    cmd = [sys.executable, str(BASE_DIR / "convert_lora_checkpoint.py"), str(p)]
+    cmd = [sys.executable, str(cnf.BASE_DIR / "convert_lora_checkpoint.py"), str(p)]
     if force:
         cmd += ["--force"]
     result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
@@ -2197,7 +2184,7 @@ function() {
 }
 """
 
-def build_ui() -> gr.Blocks:
+def build_ui(args: argparse.Namespace) -> gr.Blocks:
     _ensure_default_model()
 
     initial_checkpoints      = _scan_checkpoints()
@@ -2208,7 +2195,7 @@ def build_ui() -> gr.Blocks:
     model_precision_choices  = _precision_choices_for_device(default_model_device)
     codec_precision_choices  = _precision_choices_for_device(default_codec_device)
     initial_configs          = _scan_configs()
-    default_config           = next((c for c in initial_configs if DEFAULT_CONFIG in c), initial_configs[-1] if initial_configs else "")
+    default_config           = next((c for c in initial_configs if cnf.DEFAULT_CONFIG in c), initial_configs[-1] if initial_configs else "")
     initial_manifests        = _scan_manifests()
     initial_train_ckpts      = _scan_train_checkpoints()
 
@@ -2233,7 +2220,7 @@ def build_ui() -> gr.Blocks:
                 with gr.Accordion("⬇️ HuggingFace からモデルをダウンロード", open=not bool(initial_checkpoints)):
                     with gr.Row():
                         hf_repo_id = gr.Textbox(
-                            label="HuggingFace repo id", value=DEFAULT_HF_REPO,
+                            label="HuggingFace repo id", value=cnf.DEFAULT_HF_REPO,
                             placeholder="org/model-name", scale=4,
                         )
                         hf_dl_btn = gr.Button("ダウンロード", scale=1)
@@ -2255,7 +2242,7 @@ def build_ui() -> gr.Blocks:
                         value="（なし）",
                         scale=4, allow_custom_value=False,
                     )
-                    infer_lora_refresh_btn = gr.Button("🔄", scale=1)
+                    infer_lora_refresh_btn = gr.Button("🔄 更新", scale=1)
                 infer_lora_compat_status = gr.Textbox(
                     label="LoRA互換性チェック",
                     value="",
@@ -2274,27 +2261,27 @@ def build_ui() -> gr.Blocks:
                     visible=False,
                     info="指定したモジュールのLoRAをスケール0で無効化します。",
                 )
+                with gr.Accordion("モデル詳細設定", open=False):
+                    with gr.Row():
+                        model_device = gr.Dropdown(label="モデルデバイス", choices=device_choices, value=default_model_device, scale=1)
+                        model_precision = gr.Dropdown(label="モデル精度", choices=model_precision_choices, value=model_precision_choices[0], scale=1)
+                        codec_device = gr.Dropdown(label="コーデックデバイス", choices=device_choices, value=default_codec_device, scale=1)
+                        codec_precision = gr.Dropdown(label="コーデック精度", choices=codec_precision_choices, value=codec_precision_choices[0], scale=1)
+                        enable_watermark = gr.Checkbox(label="ウォーターマーク", value=False, scale=1)
 
-                with gr.Row():
-                    model_device = gr.Dropdown(label="モデルデバイス", choices=device_choices, value=default_model_device, scale=1)
-                    model_precision = gr.Dropdown(label="モデル精度", choices=model_precision_choices, value=model_precision_choices[0], scale=1)
-                    codec_device = gr.Dropdown(label="コーデックデバイス", choices=device_choices, value=default_codec_device, scale=1)
-                    codec_precision = gr.Dropdown(label="コーデック精度", choices=codec_precision_choices, value=codec_precision_choices[0], scale=1)
-                    enable_watermark = gr.Checkbox(label="ウォーターマーク", value=False, scale=1)
-
-                # codec_repo 選択（モデルロード後に自動更新）
-                infer_codec_repo = gr.Dropdown(
-                    label="コーデックリポジトリ（モデル読み込み時に自動設定）",
-                    choices=PREPARE_CODEC_REPO_CHOICES,
-                    value="Aratako/Semantic-DACVAE-Japanese-32dim",
-                    info="v2(dim32) / v1(dim128) — モデル読み込み後に自動切替されます。",
-                    interactive=True,
-                )
-
-                with gr.Row():
-                    load_model_btn  = gr.Button("📥 モデル読み込み", variant="secondary")
-                    unload_model_btn= gr.Button("🗑️ メモリ解放",    variant="secondary")
-                model_status = gr.Textbox(label="モデルステータス", interactive=False, lines=4)
+                    # codec_repo 選択（モデルロード後に自動更新）
+                    infer_codec_repo = gr.Dropdown(
+                        label="コーデックリポジトリ（モデル読み込み時に自動設定）",
+                        choices=cnf.PREPARE_CODEC_REPO_CHOICES,
+                        value="Aratako/Semantic-DACVAE-Japanese-32dim",
+                        info="v2(dim32) / v1(dim128) — モデル読み込み後に自動切替されます。",
+                        interactive=True,
+                    )
+                    with gr.Row():
+                        load_model_btn  = gr.Button("📥 モデル読み込み", variant="secondary")
+                        unload_model_btn= gr.Button("🗑️ メモリ解放",    variant="secondary")
+                    
+                    model_status = gr.Textbox(label="モデルステータス", interactive=False, lines=4)
 
                 gr.Markdown("## 音声生成")
 
@@ -2330,8 +2317,8 @@ def build_ui() -> gr.Blocks:
                             def _on_spk_select(name):
                                 if not name or name == "（使用しない）":
                                     return "", ""
-                                pt = SPEAKERS_DIR / name / "ref.pt"
-                                profile_p = SPEAKERS_DIR / name / "profile.json"
+                                pt = cnf.SPEAKERS_DIR / name / "ref.pt"
+                                profile_p = cnf.SPEAKERS_DIR / name / "profile.json"
                                 pt_str = str(pt) if pt.exists() else ""
                                 info = ""
                                 if profile_p.exists():
@@ -2514,7 +2501,7 @@ def build_ui() -> gr.Blocks:
                     speaker_kv_scale_raw  = gr.Textbox(visible=False, value="")
 
                 # ── 改行分割生成オプション ───────────────────────────────
-                with gr.Accordion("📝 改行分割生成オプション", open=True):
+                with gr.Accordion("📝 改行分割生成オプション", open=False):
                     gr.Markdown(
                         "プロンプトの改行ごとに生成を区切り、連続生成・連結するオプションです。\n"
                         "- **デフォルト**: テキスト全体を1回で生成します（従来の動作）\n"
@@ -2576,14 +2563,19 @@ def build_ui() -> gr.Blocks:
                             value="",
                         )
 
+                filename_prefix = gr.Textbox(
+                    label="File name prefix (If left blank, use the model name)",
+                    value=args.output_prefix,
+                    scale=4,
+                )
+                
                 generate_btn = gr.Button("🎵 生成", variant="primary", size="lg")
 
                 # ── 候補リスト（最大8候補）──────────────────────────
                 _MAX_CANDIDATES = 8
                 gr.Markdown("### 生成結果")
                 gr.Markdown(
-                    "各候補の再生ボタンで試聴できます。"
-                    "ファイルは `gradio_outputs/` フォルダに保存されています。"
+                    "ファイルは `" + str(cnf.OUTPUTS_DIR) + "` フォルダに保存されています。"
                 )
 
                 # 候補ごとに (ラベルTextbox + Audioプレイヤー) を最大8セット用意し
@@ -2776,6 +2768,7 @@ def build_ui() -> gr.Blocks:
                         num_candidates,
                         multiline_mode,
                         silence_sec,
+                        filename_prefix,
                     ],
                     outputs=_ui_outputs,
                 )
@@ -2805,8 +2798,8 @@ def build_ui() -> gr.Blocks:
                 with gr.Group() as pm_local_group:
                     pm_dataset = gr.Textbox(
                         label="ファイルパス（CSV または JSONL）",
-                        value=str(DEFAULT_DATASET_DIR / "metadata.csv"),
-                        placeholder=str(DEFAULT_DATASET_DIR / "metadata.csv"),
+                        value=str(cnf.DEFAULT_DATASET_DIR / "metadata.csv"),
+                        placeholder=str(cnf.DEFAULT_DATASET_DIR / "metadata.csv"),
                         info="Dataset作成タブで生成したmetadata.csv / metadata.jsonlを指定",
                     )
 
@@ -2844,11 +2837,11 @@ def build_ui() -> gr.Blocks:
                 with gr.Row():
                     pm_output_manifest = gr.Textbox(
                         label="出力マニフェストパス（.jsonl）",
-                        value=str(BASE_DIR / "data" / "train_manifest.jsonl"),
+                        value=str(cnf.BASE_DIR / "data" / "train_manifest.jsonl"),
                     )
                     pm_latent_dir = gr.Textbox(
                         label="ラテント保存フォルダ",
-                        value=str(BASE_DIR / "data" / "latents"),
+                        value=str(cnf.BASE_DIR / "data" / "latents"),
                     )
                     pm_device = gr.Dropdown(
                         label="使用デバイス", choices=device_choices, value=default_model_device,
@@ -2856,8 +2849,8 @@ def build_ui() -> gr.Blocks:
 
                 pm_codec_repo = gr.Dropdown(
                     label="DACVAE codec",
-                    choices=PREPARE_CODEC_REPO_CHOICES,
-                    value=DEFAULT_PREPARE_CODEC_REPO,
+                    choices=cnf.PREPARE_CODEC_REPO_CHOICES,
+                    value=cnf.DEFAULT_PREPARE_CODEC_REPO,
                     allow_custom_value=True,
                     info="v2(dim32) default / switch to v1(dim128) as needed.",
                 )
@@ -3016,7 +3009,7 @@ def build_ui() -> gr.Blocks:
                     train_manifest_refresh = gr.Button("🔄", scale=1)
                 train_output_dir = gr.Textbox(
                     label="学習出力フォルダ（チェックポイント保存先）",
-                    value=str(BASE_DIR / "outputs" / "irodori_tts"),
+                    value=str(cnf.OUTPUTS_DIR / "irodori_tts"),
                 )
 
                 with gr.Row():
@@ -3036,7 +3029,7 @@ def build_ui() -> gr.Blocks:
 
                 with gr.Accordion("🔁 ベースモデル・追加学習設定", open=True):
                     _default_safetensors = str(
-                        CHECKPOINTS_DIR / "Aratako_Irodori-TTS-500M-v2" / "model.safetensors"
+                        cnf.CHECKPOINTS_DIR / "Aratako_Irodori-TTS-500M-v2" / "model.safetensors"
                     )
                     gr.Markdown(
                         "**--resume オプション設定**\n\n"
@@ -3392,8 +3385,8 @@ def build_ui() -> gr.Blocks:
                         label="ベースモデル (.pt / .safetensors)",
                         choices=initial_checkpoints,
                         value=(
-                            str(CHECKPOINTS_DIR / "Aratako_Irodori-TTS-500M-v2" / "model.safetensors")
-                            if (CHECKPOINTS_DIR / "Aratako_Irodori-TTS-500M-v2" / "model.safetensors").exists()
+                            str(cnf.CHECKPOINTS_DIR / "Aratako_Irodori-TTS-500M-v2" / "model.safetensors")
+                            if (cnf.CHECKPOINTS_DIR / "Aratako_Irodori-TTS-500M-v2" / "model.safetensors").exists()
                             else (initial_checkpoints[-1] if initial_checkpoints else None)
                         ),
                         allow_custom_value=True, scale=4,
@@ -3418,7 +3411,7 @@ def build_ui() -> gr.Blocks:
                     )
                     lora_output_dir = gr.Textbox(
                         label="LoRA出力フォルダ（空欄=lora/{run_name}/）",
-                        value="", placeholder=str(LORA_DIR / "{run_name}"), scale=2,
+                        value="", placeholder=str(cnf.LORA_DIR / "{run_name}"), scale=2,
                     )
 
                 # ── 保存モード・Attention ──
@@ -3639,15 +3632,15 @@ def build_ui() -> gr.Blocks:
                     with gr.Row():
                         ds_input = gr.Textbox(
                             label="入力パス（ファイルまたはフォルダ）",
-                            value=str(BASE_DIR / "input"),
+                            value=str(cnf.BASE_DIR / "input"),
                             placeholder="/path/to/audio_or_folder",
                             scale=3,
                         )
                         ds_recursive_slice = gr.Checkbox(label="サブフォルダも検索", value=False, scale=1)
                     ds_slice_output = gr.Textbox(
                         label="スライス済み音声の保存先フォルダ",
-                        value=str(DEFAULT_DATASET_DIR),
-                        placeholder=str(DEFAULT_DATASET_DIR),
+                        value=str(cnf.DEFAULT_DATASET_DIR),
+                        placeholder=str(cnf.DEFAULT_DATASET_DIR),
                     )
                     with gr.Row():
                         ds_min_sec      = gr.Number(label="最小セグメント長（秒）", value=2.0,
@@ -3670,8 +3663,8 @@ def build_ui() -> gr.Blocks:
                     gr.Markdown("*faster-whisper で音声を文字起こしします。精度重視設定（large-v3 + beam=5）がデフォルトです。*")
                     ds_caption_input = gr.Textbox(
                         label="キャプション対象フォルダ（キャプションのみモード時に使用）",
-                        value=str(DEFAULT_DATASET_DIR),
-                        placeholder=str(DEFAULT_DATASET_DIR),
+                        value=str(cnf.DEFAULT_DATASET_DIR),
+                        placeholder=str(cnf.DEFAULT_DATASET_DIR),
                         info="パイプラインモード時はスライス出力先が自動的に使われます。",
                     )
                     with gr.Row():
@@ -3701,7 +3694,7 @@ def build_ui() -> gr.Blocks:
                         ds_recursive_caption = gr.Checkbox(label="サブフォルダも検索", value=False, scale=1)
                     ds_model_cache_dir = gr.Textbox(
                         label="Whisperモデルキャッシュフォルダ",
-                        value=str(CHECKPOINTS_DIR / "whisper"),
+                        value=str(cnf.CHECKPOINTS_DIR / "whisper"),
                         info="モデルが存在しない場合は自動ダウンロードされます。空欄にするとHFデフォルト (~/.cache/huggingface/hub) に保存されます。",
                     )
 
@@ -3756,8 +3749,8 @@ def build_ui() -> gr.Blocks:
                     with gr.Row():
                         ds_manifest_output_dir = gr.Textbox(
                             label="manifest保存先フォルダ",
-                            value=str(DEFAULT_DATASET_DIR),
-                            placeholder=str(DEFAULT_DATASET_DIR),
+                            value=str(cnf.DEFAULT_DATASET_DIR),
+                            placeholder=str(cnf.DEFAULT_DATASET_DIR),
                             scale=3,
                         )
                         ds_manifest_filename = gr.Textbox(
@@ -4119,9 +4112,9 @@ def build_ui() -> gr.Blocks:
                             scale=1,
                         )
                         merge_output_dir = gr.Textbox(
-                            label="保存先フォルダ（空欄=checkpoints/merged/）",
+                            label="保存先フォルダ（空欄=" + str(cnf.CHECKPOINTS_DIR) + "/merged/）",
                             value="",
-                            placeholder=str(CHECKPOINTS_DIR / "merged"),
+                            placeholder=str(cnf.CHECKPOINTS_DIR / "merged"),
                             scale=3,
                         )
 
@@ -4257,9 +4250,9 @@ def build_ui() -> gr.Blocks:
 
                         with gr.Accordion("💾 出力設定", open=True):
                             ll_output_dir = gr.Textbox(
-                                label="保存先フォルダ（空欄=lora/lora_merged_*/）",
+                                label="保存先フォルダ（空欄=" + str(cnf.LORA_DIR) + "/lora_merged_*/）",
                                 value="",
-                                placeholder=str(Path(__file__).resolve().parent / "lora" / "lora_merged_*"),
+                                placeholder=str(cnf.LORA_DIR / "lora_merged_*"),
                             )
 
                         ll_run_btn = gr.Button("🔀 LoRAマージ実行", variant="primary", size="lg")
@@ -4488,7 +4481,7 @@ def build_ui() -> gr.Blocks:
                                 lm_output_dir = gr.Textbox(
                                     label="保存先フォルダ（空欄=checkpoints/lora_merged/）",
                                     value="",
-                                    placeholder=str(CHECKPOINTS_DIR / "lora_merged"),
+                                    placeholder=str(cnf.CHECKPOINTS_DIR / "lora_merged"),
                                     scale=3,
                                 )
 
@@ -4624,22 +4617,36 @@ def build_ui() -> gr.Blocks:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Irodori-TTS GUI")
+    parser.add_argument("--checkpoint", default=None, help="model path (.pt/.safetensors) or model directory")
+    parser.add_argument("--output-dir", default="gradio_outputs", help="output directory (default: gradio_outputs)")
+    parser.add_argument("--lora-dir", default="lora", help="lora directory (default: lora)")
+    parser.add_argument("--output-prefix", default="sample", help="output file name prefix (default: sample)")
     parser.add_argument("--server-name", default="127.0.0.1")
     parser.add_argument("--server-port", type=int, default=7860)
     parser.add_argument("--share", action="store_true")
     parser.add_argument("--debug", action="store_true")
     args = parser.parse_args()
 
-    demo = build_ui()
+    allowed_paths = []
+    if args.checkpoint:
+        cnf.CHECKPOINTS_DIR = Path(args.checkpoint)
+    if args.output_dir:
+        cnf.OUTPUTS_DIR = Path(args.output_dir)
+        allowed_paths = [args.output_dir]
+    if args.lora_dir:
+        cnf.LORA_DIR = Path(args.lora_dir)
+        
+    demo = build_ui(args)
     demo.queue(default_concurrency_limit=1)
     demo.launch(
         server_name=args.server_name,
         server_port=args.server_port,
         share=bool(args.share),
         debug=bool(args.debug),
-        theme=gr.themes.Soft(),
-        css=_DARK_CSS,
-        js=_DARK_JS,
+        allowed_paths=allowed_paths,
+        # theme=gr.themes.Soft(),
+        # css=_DARK_CSS,
+        # js=_DARK_JS,
     )
 
 
