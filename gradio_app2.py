@@ -5,7 +5,7 @@ import argparse
 
 import gradio as gr
 
-import gradio_conf as cnf
+from ui.setting import cnfg
 
 from ui.common import (
     default_model_device,
@@ -43,7 +43,7 @@ def build_ui(args: argparse.Namespace) -> gr.Blocks:
     codec_precision_choices = precision_choices_for_device(default_codec_device_)
     initial_configs = scan_configs()
     default_config = next(
-        (c for c in initial_configs if cnf.DEFAULT_CONFIG in c),
+        (c for c in initial_configs if cnfg.default_config in c),
         initial_configs[-1] if initial_configs else "",
     )
     initial_manifests = scan_manifests()
@@ -105,12 +105,12 @@ def main() -> None:
 
     allowed_paths = []
     if args.checkpoint:
-        cnf.CHECKPOINTS_DIR = Path(args.checkpoint)
+        cnfg.checkpoints_dir = Path(args.checkpoint)
     if args.output_dir:
-        cnf.OUTPUTS_DIR = Path(args.output_dir)
+        cnfg.outputs_dir = Path(args.output_dir)
         allowed_paths = [args.output_dir]
     if args.lora_dir:
-        cnf.LORA_DIR = Path(args.lora_dir)
+        cnfg.lora_dir = Path(args.lora_dir)
 
     demo = build_ui(args)
     demo.queue(default_concurrency_limit=1)

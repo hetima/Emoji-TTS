@@ -5,7 +5,7 @@ import threading
 from datetime import datetime
 import gradio as gr
 from ui.common import *
-import gradio_conf as cnf
+from .setting import cnfg
 
 _LORA_TRAIN_LOG_LOCK = threading.Lock()
 _LORA_TRAIN_PROC: subprocess.Popen | None = None
@@ -17,11 +17,12 @@ _LORA_ETA_INFO: dict = {}
 # LoRAプリセット用ユーティリティ  ← 追加
 # ─────────────────────────────
 
+
 def _scan_lora_configs() -> list[str]:
     """configs/ 配下のYAMLのうち 'lora' セクションを持つものを列挙。"""
-    cnf.CONFIGS_DIR.mkdir(parents=True, exist_ok=True)
+    cnfg.configs_dir.mkdir(parents=True, exist_ok=True)
     result = []
-    for p in sorted(cnf.CONFIGS_DIR.glob("*.yaml")) + sorted(cnf.CONFIGS_DIR.glob("*.yml")):
+    for p in sorted(cnfg.configs_dir.glob("*.yaml")) + sorted(cnfg.configs_dir.glob("*.yml")):
         try:
             data = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
             if "lora" in data:
@@ -32,17 +33,37 @@ def _scan_lora_configs() -> list[str]:
 
 
 def _lora_config_from_ui(
-    base_model, manifest, output_dir, run_name,
-    lora_rank, lora_alpha, lora_dropout, target_modules,
-    save_mode, attention_backend,
-    use_early_stopping, es_patience, es_min_delta,
-    use_ema, ema_decay,
-    resume_enabled, resume_lora_path,
-    batch_size, grad_accum, lr, optimizer,
-    lr_scheduler, warmup_steps,
-    max_steps, save_every, log_every,
-    valid_ratio, valid_every,
-    wandb_enabled, wandb_project, wandb_run_name,
+    base_model,
+    manifest,
+    output_dir,
+    run_name,
+    lora_rank,
+    lora_alpha,
+    lora_dropout,
+    target_modules,
+    save_mode,
+    attention_backend,
+    use_early_stopping,
+    es_patience,
+    es_min_delta,
+    use_ema,
+    ema_decay,
+    resume_enabled,
+    resume_lora_path,
+    batch_size,
+    grad_accum,
+    lr,
+    optimizer,
+    lr_scheduler,
+    warmup_steps,
+    max_steps,
+    save_every,
+    log_every,
+    valid_ratio,
+    valid_every,
+    wandb_enabled,
+    wandb_project,
+    wandb_run_name,
     seed,
 ) -> dict:
     return {
@@ -78,12 +99,12 @@ def _lora_config_from_ui(
 
 
 def _save_lora_config(config_name: str, data: dict) -> str:
-    cnf.CONFIGS_DIR.mkdir(parents=True, exist_ok=True)
+    cnfg.configs_dir.mkdir(parents=True, exist_ok=True)
     p = Path(config_name)
     if not p.suffix:
         p = p.with_suffix(".yaml")
     if not p.is_absolute():
-        p = cnf.CONFIGS_DIR / p.name
+        p = cnfg.configs_dir / p.name
     with open(p, "w", encoding="utf-8") as f:
         yaml.dump(data, f, allow_unicode=True, default_flow_style=False, sort_keys=False)
     return f"保存しました: {p}"
@@ -96,26 +117,44 @@ def _load_lora_config(config_path: str) -> dict:
     if not p.is_file():
         return {}
     data = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
-    return data.get("lora", {}) # type: ignore
+    return data.get("lora", {})  # type: ignore
 
 
 def _load_lora_preset(config_path: str):
     if not config_path:
         return (
-            16, 32.0, 0.05, "wq,wk,wv,wo",
-            "EMAのみ", "sdpa",
-            False, 3, 0.01,
-            True, 0.9999,
-            4, 1, 1e-4, "adamw",
-            "none", 0,
-            1000, 100, 10,
-            0.0, 100,
-            False, "", "",
+            16,
+            32.0,
+            0.05,
+            "wq,wk,wv,wo",
+            "EMAのみ",
+            "sdpa",
+            False,
+            3,
+            0.01,
+            True,
+            0.9999,
+            4,
+            1,
+            1e-4,
+            "adamw",
+            "none",
+            0,
+            1000,
+            100,
+            10,
+            0.0,
+            100,
+            False,
+            "",
+            "",
             0,
         )
     cfg = _load_lora_config(config_path)
+
     def g(k, fb):
         return cfg.get(k, fb)
+
     return (
         g("lora_rank", 16),
         g("lora_alpha", 32.0),
@@ -151,25 +190,46 @@ def _save_lora_preset(name: str, *cfg_args):
     return _save_lora_config(name, cfg_data)
 
 
-
 # ─────────────────────────────
 # LoRA 学習タブ ロジック
 # ─────────────────────────────
 
+
 def _build_lora_train_command(
-    base_model, manifest, output_dir, run_name,
-    lora_rank, lora_alpha, lora_dropout, target_modules,
-    save_mode, attention_backend,
-    use_early_stopping, es_patience, es_min_delta,
-    use_ema, ema_decay,
-    resume_enabled, resume_lora_path,
-    batch_size, grad_accum, lr, optimizer, lr_scheduler, warmup_steps,
-    max_steps, save_every, log_every,
-    valid_ratio, valid_every,
-    wandb_enabled, wandb_project, wandb_run_name,
+    base_model,
+    manifest,
+    output_dir,
+    run_name,
+    lora_rank,
+    lora_alpha,
+    lora_dropout,
+    target_modules,
+    save_mode,
+    attention_backend,
+    use_early_stopping,
+    es_patience,
+    es_min_delta,
+    use_ema,
+    ema_decay,
+    resume_enabled,
+    resume_lora_path,
+    batch_size,
+    grad_accum,
+    lr,
+    optimizer,
+    lr_scheduler,
+    warmup_steps,
+    max_steps,
+    save_every,
+    log_every,
+    valid_ratio,
+    valid_every,
+    wandb_enabled,
+    wandb_project,
+    wandb_run_name,
     seed,
 ) -> list[str]:
-    cmd = [sys.executable, str(cnf.REPO_DIR / "lora_train.py")]
+    cmd = [sys.executable, str(cnfg.repo_dir / "lora_train.py")]
     cmd += ["--base-model", str(base_model)]
     cmd += ["--manifest", str(manifest)]
 
@@ -181,20 +241,34 @@ def _build_lora_train_command(
         cmd += ["--output-dir", str(output_dir).strip()]
 
     cmd += [
-        "--lora-rank", str(int(lora_rank)),
-        "--lora-alpha", str(float(lora_alpha)),
-        "--lora-dropout", str(float(lora_dropout)),
-        "--target-modules", str(target_modules).strip(),
-        "--batch-size", str(int(batch_size)),
-        "--gradient-accumulation-steps", str(int(grad_accum)),
-        "--lr", str(float(lr)),
-        "--optimizer", str(optimizer),
-        "--lr-scheduler", str(lr_scheduler),
-        "--warmup-steps", str(int(warmup_steps)),
-        "--max-steps", str(int(max_steps)),
-        "--save-every", str(int(save_every)),
-        "--log-every", str(int(log_every)),
-        "--seed", str(int(seed)),
+        "--lora-rank",
+        str(int(lora_rank)),
+        "--lora-alpha",
+        str(float(lora_alpha)),
+        "--lora-dropout",
+        str(float(lora_dropout)),
+        "--target-modules",
+        str(target_modules).strip(),
+        "--batch-size",
+        str(int(batch_size)),
+        "--gradient-accumulation-steps",
+        str(int(grad_accum)),
+        "--lr",
+        str(float(lr)),
+        "--optimizer",
+        str(optimizer),
+        "--lr-scheduler",
+        str(lr_scheduler),
+        "--warmup-steps",
+        str(int(warmup_steps)),
+        "--max-steps",
+        str(int(max_steps)),
+        "--save-every",
+        str(int(save_every)),
+        "--log-every",
+        str(int(log_every)),
+        "--seed",
+        str(int(seed)),
     ]
 
     if str(attention_backend) != "sdpa":
@@ -214,8 +288,10 @@ def _build_lora_train_command(
     if use_early_stopping and float(valid_ratio) > 0.0:
         cmd += [
             "--early-stopping",
-            "--early-stopping-patience", str(int(es_patience)),
-            "--early-stopping-min-delta", str(float(es_min_delta)),
+            "--early-stopping-patience",
+            str(int(es_patience)),
+            "--early-stopping-min-delta",
+            str(float(es_min_delta)),
         ]
 
     if wandb_enabled:
@@ -252,9 +328,9 @@ def _start_lora_train(*args) -> tuple[str, str]:
     except (IndexError, ValueError, TypeError):
         _max_steps = 0
 
-    cnf.LOGS_DIR.mkdir(parents=True, exist_ok=True)
+    cnfg.logs_dir.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    log_path = cnf.LOGS_DIR / f"lora_train_{stamp}.log"
+    log_path = cnfg.logs_dir / f"lora_train_{stamp}.log"
 
     _LORA_ETA_INFO.clear()
 
@@ -265,14 +341,23 @@ def _start_lora_train(*args) -> tuple[str, str]:
         env["PYTHONIOENCODING"] = "utf-8"
         env["PYTHONUNBUFFERED"] = "1"
         proc = subprocess.Popen(
-            cmd_list, shell=False, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            text=True, bufsize=1, encoding="utf-8", errors="replace", env=env,
+            cmd_list,
+            shell=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+            encoding="utf-8",
+            errors="replace",
+            env=env,
         )
         _LORA_TRAIN_PROC = proc
 
     import re as _re_eta
+
     _STEP_RE = _re_eta.compile(r"step=(\d+)")
     import re as _re_speed
+
     _SPEED_RE = _re_speed.compile(r"speed=([0-9.]+)steps/s")
     _ETA_STR_RE = _re_speed.compile(r"eta=(.+)")
 
@@ -281,6 +366,7 @@ def _start_lora_train(*args) -> tuple[str, str]:
         フォーマット: 〇時間〇分 / 〇分〇秒 / 〇秒
         """
         import re as _r
+
         s = eta_str.strip()
         total = 0.0
         m = _r.search(r"(\d+)時間", s)
@@ -296,7 +382,7 @@ def _start_lora_train(*args) -> tuple[str, str]:
 
     def _stream():
         with open(log_path, "w", encoding="utf-8") as f:
-            for line in proc.stdout: # type: ignore
+            for line in proc.stdout:  # type: ignore
                 f.write(line)
                 f.flush()
                 # ステップ行からstep/speed/etaを直接パースして更新
@@ -309,12 +395,14 @@ def _start_lora_train(*args) -> tuple[str, str]:
                         current_step = int(m_step.group(1))
                         speed = float(m_speed.group(1)) if m_speed else 0.0
                         eta_sec = _eta_str_to_sec(m_eta.group(1)) if m_eta else 0.0
-                        _LORA_ETA_INFO.update({
-                            "step": current_step,
-                            "max_steps": _max_steps,
-                            "speed": speed,
-                            "eta_sec": eta_sec,
-                        })
+                        _LORA_ETA_INFO.update(
+                            {
+                                "step": current_step,
+                                "max_steps": _max_steps,
+                                "speed": speed,
+                                "eta_sec": eta_sec,
+                            }
+                        )
         proc.wait()
 
     threading.Thread(target=_stream, daemon=True).start()
@@ -328,6 +416,7 @@ def _start_lora_train(*args) -> tuple[str, str]:
 def _stop_lora_train() -> str:
     global _LORA_TRAIN_PROC
     import signal as _signal
+
     with _LORA_TRAIN_LOG_LOCK:
         if _LORA_TRAIN_PROC is None or _LORA_TRAIN_PROC.poll() is not None:
             return "実行中のLoRA学習プロセスはありません。"
@@ -336,19 +425,24 @@ def _stop_lora_train() -> str:
     # SIGINTでグレースフルシャットダウンを試みる（DataLoaderが正常終了できる）
     try:
         import os as _os
+
         _os.kill(pid, _signal.SIGINT)
     except (ProcessLookupError, PermissionError, OSError):
         pass
+
     # 最大5秒待機し、まだ生きていれば強制終了
     def _deferred_kill():
         import time as _t
+
         _t.sleep(5)
         if proc.poll() is None:
             try:
                 proc.kill()
             except Exception:
                 pass
+
     import threading as _thr
+
     _thr.Thread(target=_deferred_kill, daemon=True).start()
     return f"LoRA学習プロセス (PID {pid}) に停止シグナルを送信しました（最大5秒でシャットダウン）。"
 
@@ -388,9 +482,11 @@ def _read_lora_train_log() -> str:
         )
     return text
 
+
 # ─────────────────────────────
 # UI 生成
 # ─────────────────────────────
+
 
 def build(ctx):
     with gr.Tab("🚀 LoRA学習"):
@@ -423,11 +519,14 @@ def build(ctx):
                 label="ベースモデル (.pt / .safetensors)",
                 choices=ctx.initial_checkpoints,
                 value=(
-                    str(cnf.CHECKPOINTS_DIR / "Aratako_Irodori-TTS-500M-v2" / "model.safetensors")
-                    if (cnf.CHECKPOINTS_DIR / "Aratako_Irodori-TTS-500M-v2" / "model.safetensors").exists()
+                    str(cnfg.checkpoints_dir / "Aratako_Irodori-TTS-500M-v2" / "model.safetensors")
+                    if (
+                        cnfg.checkpoints_dir / "Aratako_Irodori-TTS-500M-v2" / "model.safetensors"
+                    ).exists()
                     else (ctx.initial_checkpoints[-1] if ctx.initial_checkpoints else None)
                 ),
-                allow_custom_value=True, scale=4,
+                allow_custom_value=True,
+                scale=4,
             )
             lora_base_refresh_btn = gr.Button("更新", scale=1)
 
@@ -436,18 +535,23 @@ def build(ctx):
                 label="マニフェストファイル (.jsonl)",
                 choices=ctx.initial_manifests,
                 value=ctx.initial_manifests[-1] if ctx.initial_manifests else None,
-                allow_custom_value=True, scale=4,
+                allow_custom_value=True,
+                scale=4,
             )
             lora_manifest_refresh_btn = gr.Button("更新", scale=1)
 
         with gr.Row():
             lora_run_name = gr.Textbox(
                 label="実行名 (run_name)（空欄=タイムスタンプ自動生成）",
-                value="", placeholder="my_lora_run", scale=2,
+                value="",
+                placeholder="my_lora_run",
+                scale=2,
             )
             lora_output_dir = gr.Textbox(
                 label="LoRA出力フォルダ（空欄=lora/{run_name}/）",
-                value="", placeholder=str(cnf.LORA_DIR / "{run_name}"), scale=2,
+                value="",
+                placeholder=str(cnfg.lora_dir / "{run_name}"),
+                scale=2,
             )
 
         with gr.Row():
@@ -468,7 +572,9 @@ def build(ctx):
             with gr.Row():
                 lora_rank = gr.Slider(label="LoRAランク", minimum=1, maximum=128, value=16, step=1)
                 lora_alpha = gr.Number(label="lora_alpha", value=32.0)
-                lora_dropout = gr.Slider(label="lora_dropout", minimum=0.0, maximum=0.5, value=0.05, step=0.01)
+                lora_dropout = gr.Slider(
+                    label="lora_dropout", minimum=0.0, maximum=0.5, value=0.05, step=0.01
+                )
             lora_target_modules = gr.Textbox(
                 label="ターゲットモジュール（カンマ区切り）",
                 value="wq,wk,wv,wo",
@@ -481,25 +587,31 @@ def build(ctx):
                 lora_resume_path = gr.Dropdown(
                     label="既存LoRAフォルダ（_full推奨）",
                     choices=scan_lora_adapters(),
-                    value=None, allow_custom_value=True, scale=4,
+                    value=None,
+                    allow_custom_value=True,
+                    scale=4,
                 )
                 lora_resume_refresh_btn = gr.Button("更新", scale=1)
             lora_resume_warning = gr.Markdown(visible=False)
 
             def _on_lora_resume_path_change(path):
                 if path and "_ema" in str(path):
-                    return gr.update(visible=True, value=(
-                        "⚠️ **_ema フォルダを選択しています。**\n\n"
-                        "EMA版にはoptimizer状態・step数が含まれないため、"
-                        "学習は step=0 から再スタートします。\n"
-                        "学習率ウォームアップが再度かかり、学習曲線が不連続になります。\n\n"
-                        "中断した学習を完全に再開する場合は **_full フォルダ** を選択してください。"
-                    ))
+                    return gr.update(
+                        visible=True,
+                        value=(
+                            "⚠️ **_ema フォルダを選択しています。**\n\n"
+                            "EMA版にはoptimizer状態・step数が含まれないため、"
+                            "学習は step=0 から再スタートします。\n"
+                            "学習率ウォームアップが再度かかり、学習曲線が不連続になります。\n\n"
+                            "中断した学習を完全に再開する場合は **_full フォルダ** を選択してください。"
+                        ),
+                    )
                 return gr.update(visible=False)
 
             lora_resume_path.change(
                 _on_lora_resume_path_change,
-                inputs=[lora_resume_path], outputs=[lora_resume_warning],
+                inputs=[lora_resume_path],
+                outputs=[lora_resume_warning],
             )
             lora_resume_refresh_btn.click(
                 lambda: gr.Dropdown(choices=scan_lora_adapters()),
@@ -508,16 +620,23 @@ def build(ctx):
 
         with gr.Accordion("学習パラメータ", open=True):
             with gr.Row():
-                lora_batch_size = gr.Slider(label="バッチサイズ", minimum=1, maximum=32, value=4, step=1)
-                lora_grad_accum = gr.Slider(label="勾配蓄積ステップ", minimum=1, maximum=16, value=1, step=1)
+                lora_batch_size = gr.Slider(
+                    label="バッチサイズ", minimum=1, maximum=32, value=4, step=1
+                )
+                lora_grad_accum = gr.Slider(
+                    label="勾配蓄積ステップ", minimum=1, maximum=16, value=1, step=1
+                )
             with gr.Row():
                 lora_lr = gr.Number(label="学習率", value=1e-4)
                 lora_optimizer = gr.Dropdown(
-                    label="オプティマイザ", choices=["adamw", "muon", "lion", "ademamix"],
+                    label="オプティマイザ",
+                    choices=["adamw", "muon", "lion", "ademamix"],
                     value="adamw",
                 )
                 lora_lr_scheduler = gr.Dropdown(
-                    label="スケジューラ", choices=["none", "cosine", "wsd"], value="none",
+                    label="スケジューラ",
+                    choices=["none", "cosine", "wsd"],
+                    value="none",
                 )
                 lora_warmup_steps = gr.Number(label="ウォームアップステップ", value=0, precision=0)
             with gr.Row():
@@ -532,7 +651,9 @@ def build(ctx):
 
         with gr.Accordion("バリデーション設定", open=False):
             with gr.Row():
-                lora_valid_ratio = gr.Slider(label="バリデーション分割比率", minimum=0.0, maximum=0.5, value=0.0, step=0.01)
+                lora_valid_ratio = gr.Slider(
+                    label="バリデーション分割比率", minimum=0.0, maximum=0.5, value=0.0, step=0.01
+                )
                 lora_valid_every = gr.Number(label="バリデーション実行間隔", value=100, precision=0)
 
         with gr.Accordion("Early Stopping設定", open=False):
@@ -559,35 +680,75 @@ def build(ctx):
 
         gr.Markdown("### 学習ログ")
         with gr.Row():
-            lora_log_interval = gr.Slider(label="自動更新間隔（秒）", minimum=2, maximum=60, value=5, step=1, scale=3)
+            lora_log_interval = gr.Slider(
+                label="自動更新間隔（秒）", minimum=2, maximum=60, value=5, step=1, scale=3
+            )
             lora_log_refresh_btn = gr.Button("手動更新", scale=1)
-        lora_log_text = gr.Textbox(label="LoRA学習ログ（末尾200行）", interactive=False, lines=15, max_lines=15)
+        lora_log_text = gr.Textbox(
+            label="LoRA学習ログ（末尾200行）", interactive=False, lines=15, max_lines=15
+        )
 
         _lora_exec_inputs = [
-            lora_base_model, lora_manifest, lora_output_dir, lora_run_name,
-            lora_rank, lora_alpha, lora_dropout, lora_target_modules,
-            lora_save_mode, lora_attention_backend,
-            lora_early_stopping, lora_es_patience, lora_es_min_delta,
-            lora_use_ema, lora_ema_decay,
-            lora_resume_enabled, lora_resume_path,
-            lora_batch_size, lora_grad_accum, lora_lr, lora_optimizer,
-            lora_lr_scheduler, lora_warmup_steps,
-            lora_max_steps, lora_save_every, lora_log_every,
-            lora_valid_ratio, lora_valid_every,
-            lora_wandb_enabled, lora_wandb_project, lora_wandb_run_name,
+            lora_base_model,
+            lora_manifest,
+            lora_output_dir,
+            lora_run_name,
+            lora_rank,
+            lora_alpha,
+            lora_dropout,
+            lora_target_modules,
+            lora_save_mode,
+            lora_attention_backend,
+            lora_early_stopping,
+            lora_es_patience,
+            lora_es_min_delta,
+            lora_use_ema,
+            lora_ema_decay,
+            lora_resume_enabled,
+            lora_resume_path,
+            lora_batch_size,
+            lora_grad_accum,
+            lora_lr,
+            lora_optimizer,
+            lora_lr_scheduler,
+            lora_warmup_steps,
+            lora_max_steps,
+            lora_save_every,
+            lora_log_every,
+            lora_valid_ratio,
+            lora_valid_every,
+            lora_wandb_enabled,
+            lora_wandb_project,
+            lora_wandb_run_name,
             lora_seed,
         ]
 
         _lora_preset_outputs = [
-            lora_rank, lora_alpha, lora_dropout, lora_target_modules,
-            lora_save_mode, lora_attention_backend,
-            lora_early_stopping, lora_es_patience, lora_es_min_delta,
-            lora_use_ema, lora_ema_decay,
-            lora_batch_size, lora_grad_accum, lora_lr, lora_optimizer,
-            lora_lr_scheduler, lora_warmup_steps,
-            lora_max_steps, lora_save_every, lora_log_every,
-            lora_valid_ratio, lora_valid_every,
-            lora_wandb_enabled, lora_wandb_project, lora_wandb_run_name,
+            lora_rank,
+            lora_alpha,
+            lora_dropout,
+            lora_target_modules,
+            lora_save_mode,
+            lora_attention_backend,
+            lora_early_stopping,
+            lora_es_patience,
+            lora_es_min_delta,
+            lora_use_ema,
+            lora_ema_decay,
+            lora_batch_size,
+            lora_grad_accum,
+            lora_lr,
+            lora_optimizer,
+            lora_lr_scheduler,
+            lora_warmup_steps,
+            lora_max_steps,
+            lora_save_every,
+            lora_log_every,
+            lora_valid_ratio,
+            lora_valid_every,
+            lora_wandb_enabled,
+            lora_wandb_project,
+            lora_wandb_run_name,
             lora_seed,
         ]
 
@@ -597,10 +758,21 @@ def build(ctx):
             except Exception as e:
                 return f"(プレビュー生成エラー: {e})"
 
-        for comp in [lora_base_model, lora_manifest, lora_output_dir, lora_run_name,
-                      lora_rank, lora_alpha, lora_dropout, lora_target_modules,
-                      lora_save_mode, lora_attention_backend,
-                      lora_use_ema, lora_ema_decay, lora_max_steps]:
+        for comp in [
+            lora_base_model,
+            lora_manifest,
+            lora_output_dir,
+            lora_run_name,
+            lora_rank,
+            lora_alpha,
+            lora_dropout,
+            lora_target_modules,
+            lora_save_mode,
+            lora_attention_backend,
+            lora_use_ema,
+            lora_ema_decay,
+            lora_max_steps,
+        ]:
             comp.change(_update_lora_cmd, inputs=_lora_exec_inputs, outputs=[lora_cmd_preview])
 
         lora_preset_dropdown.change(
@@ -619,17 +791,24 @@ def build(ctx):
         )
 
         lora_base_refresh_btn.click(
-            lambda: gr.Dropdown(choices=scan_checkpoints(), value=(scan_checkpoints() or [None])[-1]),
+            lambda: gr.Dropdown(
+                choices=scan_checkpoints(), value=(scan_checkpoints() or [None])[-1]
+            ),
             outputs=[lora_base_model],
         )
         lora_manifest_refresh_btn.click(
             lambda: gr.Dropdown(choices=scan_manifests(), value=(scan_manifests() or [None])[-1]),
             outputs=[lora_manifest],
         )
-        lora_start_btn.click(_start_lora_train, inputs=_lora_exec_inputs,
-                             outputs=[lora_train_status, lora_cmd_preview])
+        lora_start_btn.click(
+            _start_lora_train,
+            inputs=_lora_exec_inputs,
+            outputs=[lora_train_status, lora_cmd_preview],
+        )
         lora_stop_btn.click(_stop_lora_train, outputs=[lora_train_status])
         lora_log_refresh_btn.click(_read_lora_train_log, outputs=[lora_log_text])
         _lora_timer = gr.Timer(value=5, active=True)
         _lora_timer.tick(_read_lora_train_log, outputs=[lora_log_text])
-        lora_log_interval.change(lambda v: float(v), inputs=[lora_log_interval], outputs=[_lora_timer])
+        lora_log_interval.change(
+            lambda v: float(v), inputs=[lora_log_interval], outputs=[_lora_timer]
+        )

@@ -19,6 +19,7 @@ lora_merge.py - Irodori-TTS LoRAマージユーティリティ
   v1 (latent_dim=128) / v2 (latent_dim=32) 両対応。
   バージョン不一致時はエラーを返して処理しない。
 """
+
 from __future__ import annotations
 
 import json
@@ -45,7 +46,7 @@ from merge import (
     _format_compat_error,
 )
 
-import gradio_conf as cnf
+from ui.setting import cnfg
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -53,7 +54,7 @@ import gradio_conf as cnf
 # ─────────────────────────────────────────────────────────────────────────────
 
 _DIM_TO_VERSION: dict[int, str] = {
-    32:  "v2 (dim32)",
+    32: "v2 (dim32)",
     128: "v1 (dim128)",
 }
 
@@ -64,19 +65,20 @@ _ADAPTER_STATES = ("adapter_model.safetensors", "adapter_model.bin")
 _VERSION_KEY_PATTERNS = [
     # (キーに含まれる文字列, lora_A/lora_B のどちらか, shape軸インデックス)
     # in_features = shape[1] of lora_A
-    ("in_proj",  "lora_A", 1),   # in_proj.lora_A: (rank, latent_dim*patch_size)
-    ("wq",       "lora_A", 1),   # wq.lora_A:      (rank, model_dim)
-    ("wk",       "lora_A", 1),
-    ("wv",       "lora_A", 1),
-    ("wo",       "lora_B", 0),   # wo.lora_B:       (model_dim, rank) → shape[0]=model_dim
-    ("w1",       "lora_A", 1),
-    ("w2",       "lora_B", 0),
-    ("w3",       "lora_A", 1),
+    ("in_proj", "lora_A", 1),  # in_proj.lora_A: (rank, latent_dim*patch_size)
+    ("wq", "lora_A", 1),  # wq.lora_A:      (rank, model_dim)
+    ("wk", "lora_A", 1),
+    ("wv", "lora_A", 1),
+    ("wo", "lora_B", 0),  # wo.lora_B:       (model_dim, rank) → shape[0]=model_dim
+    ("w1", "lora_A", 1),
+    ("w2", "lora_B", 0),
+    ("w3", "lora_A", 1),
 ]
 
 # ─────────────────────────────────────────────────────────────────────────────
 # バージョン判定
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 def _version_label(cfg: dict[str, Any]) -> str:
     """model_config から v1/v2 ラベルを返す。"""
@@ -132,6 +134,7 @@ def _infer_adapter_version(adapter_dir: Path) -> str:
     if safe_path.is_file():
         try:
             from safetensors import safe_open
+
             with safe_open(str(safe_path), framework="pt", device="cpu") as h:
                 all_keys = list(h.keys())
 
@@ -215,8 +218,8 @@ def _validate_adapter_vs_base(
     train_state.json が利用可能な場合はそちらを優先する。
     Returns (ok, error_message).
     """
-    base_dim   = int(cfg_base.get("latent_dim", 0))
-    base_ver   = _version_label(cfg_base)
+    base_dim = int(cfg_base.get("latent_dim", 0))
+    base_ver = _version_label(cfg_base)
 
     # train_state.json ベースの検証（最も確実）
     adapter_dim = _get_adapter_latent_dim_from_train_state(adapter_dir)
@@ -236,22 +239,22 @@ def _validate_adapter_vs_base(
     if safe_path.is_file():
         try:
             from safetensors import safe_open
+
             with safe_open(str(safe_path), framework="pt", device="cpu") as h:
                 keys = list(h.keys())
             in_proj_key = next((k for k in keys if "in_proj" in k and "lora_A.weight" in k), None)
             if in_proj_key is not None:
                 with safe_open(str(safe_path), framework="pt", device="cpu") as h:
                     t = h.get_tensor(in_proj_key)
-                base_patch  = int(cfg_base.get("latent_patch_size", 1))
+                base_patch = int(cfg_base.get("latent_patch_size", 1))
                 expected_in = base_dim * base_patch
-                actual_in   = int(t.shape[1])
+                actual_in = int(t.shape[1])
                 if actual_in != expected_in:
-                    inferred_dim = next(
-                        (d for d in (32, 128) if actual_in % d == 0), None
-                    )
+                    inferred_dim = next((d for d in (32, 128) if actual_in % d == 0), None)
                     adapter_ver = (
                         _DIM_TO_VERSION.get(inferred_dim, f"unknown(dim={inferred_dim})")
-                        if inferred_dim else "不明"
+                        if inferred_dim
+                        else "不明"
                     )
                     return False, (
                         f"❌ バージョン不一致: {label} はベースモデルと互換性がありません。\n"
@@ -301,11 +304,13 @@ def _validate_adapters_mutual(
             cfg_b = json.loads(cfg_b_path.read_text(encoding="utf-8"))
             tm_a = set(cfg_a.get("target_modules", []) or [])
             tm_b = set(cfg_b.get("target_modules", []) or [])
-            r_a  = cfg_a.get("r", None)
-            r_b  = cfg_b.get("r", None)
+            r_a = cfg_a.get("r", None)
+            r_b = cfg_b.get("r", None)
             mismatches = []
             if tm_a != tm_b:
-                mismatches.append(f"   target_modules: {label_a}={sorted(tm_a)} / {label_b}={sorted(tm_b)}")
+                mismatches.append(
+                    f"   target_modules: {label_a}={sorted(tm_a)} / {label_b}={sorted(tm_b)}"
+                )
             if mismatches:
                 return False, (
                     f"⚠️ アダプタ構成が異なります（マージ結果が不安定になる可能性があります）:\n"
@@ -322,12 +327,14 @@ def _validate_adapters_mutual(
 # アダプタロード
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def _load_adapter_weights(adapter_dir: Path) -> dict[str, torch.Tensor]:
     """adapter_model.safetensors / adapter_model.bin からアダプタ重みを返す。"""
     safe_path = adapter_dir / "adapter_model.safetensors"
-    bin_path  = adapter_dir / "adapter_model.bin"
+    bin_path = adapter_dir / "adapter_model.bin"
     if safe_path.is_file():
         from safetensors.torch import load_file
+
         return load_file(str(safe_path), device="cpu")
     elif bin_path.is_file():
         return torch.load(str(bin_path), map_location="cpu", weights_only=True)
@@ -348,6 +355,7 @@ def _load_adapter_config(adapter_dir: Path) -> dict[str, Any]:
 # ─────────────────────────────────────────────────────────────────────────────
 # LoRA同士のマージ（通常LoRAマージ）
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 def _lora_weighted_average(
     wts_a: dict[str, torch.Tensor],
@@ -419,10 +427,10 @@ def _lora_task_arithmetic(
     all_keys = set(wts_base) | set(wts_a) | set(wts_b)
     for key in all_keys:
         base = wts_base.get(key, torch.zeros(1)).float()
-        a    = wts_a.get(key, base).float()
-        b    = wts_b.get(key, base).float()
+        a = wts_a.get(key, base).float()
+        b = wts_b.get(key, base).float()
         merged = base + lambda_a * (a - base) + lambda_b * (b - base)
-        dtype  = wts_a.get(key, wts_b.get(key, wts_base.get(key))).dtype
+        dtype = wts_a.get(key, wts_b.get(key, wts_base.get(key))).dtype # type: ignore
         result[key] = merged.to(dtype)
     return result
 
@@ -446,24 +454,23 @@ def _lora_partial_merge(
         # "base_model.model.blocks.0.attention.wq.lora_A.weight"
         #   → "blocks.0.attention.wq.weight" → group = "diffusion_core"
         if key.startswith("base_model.model."):
-            raw = key[len("base_model.model."):]
+            raw = key[len("base_model.model.") :]
         else:
             raw = key
         # lora_A.weight / lora_B.weight のサフィックスを除去
-        for sfx in (".lora_A.weight", ".lora_B.weight",
-                    ".lora_A.bias",   ".lora_B.bias"):
+        for sfx in (".lora_A.weight", ".lora_B.weight", ".lora_A.bias", ".lora_B.bias"):
             if raw.endswith(sfx):
                 raw = raw[: -len(sfx)] + ".weight"
                 break
         group = _key_group(raw)
-        cfg   = group_methods.get(group, {"method": "weighted_average", "alpha": 0.5})
+        cfg = group_methods.get(group, {"method": "weighted_average", "alpha": 0.5})
         method = cfg.get("method", "weighted_average")
 
         t_a = wts_a.get(key)
         t_b = wts_b.get(key)
 
         if t_a is None:
-            result[key] = t_b.clone()
+            result[key] = t_b.clone() # type: ignore
             continue
         if t_b is None:
             result[key] = t_a.clone()
@@ -505,6 +512,7 @@ def _save_lora_adapter(
 ) -> None:
     """マージ済みLoRAアダプタを出力フォルダに保存する。"""
     from safetensors.torch import save_file
+
     output_dir.mkdir(parents=True, exist_ok=True)
     weights = {k: v.contiguous() for k, v in merged_weights.items()}
     save_file(weights, str(output_dir / "adapter_model.safetensors"))
@@ -522,6 +530,7 @@ def _make_lora_output_dirname(method_name: str) -> str:
 # 焼き込み用関数（本体モデルマージ）
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def _bake_single_adapter(
     base_weights: dict[str, torch.Tensor],
     adapter_weights: dict[str, torch.Tensor],
@@ -529,22 +538,24 @@ def _bake_single_adapter(
     scale: float = 1.0,
 ) -> tuple[dict[str, torch.Tensor], int, int]:
     """W_merged = W_base + scale * (alpha/r) * (lora_B @ lora_A)"""
-    r          = int(adapter_config.get("r", 16))
+    r = int(adapter_config.get("r", 16))
     lora_alpha = float(adapter_config.get("lora_alpha", r))
-    eff_scale  = scale * (lora_alpha / r)
-    result     = {k: v.clone() for k, v in base_weights.items()}
+    eff_scale = scale * (lora_alpha / r)
+    result = {k: v.clone() for k, v in base_weights.items()}
     applied = skipped = 0
     for key_a in (k for k in adapter_weights if k.endswith(".lora_A.weight")):
-        key_b    = key_a.replace(".lora_A.weight", ".lora_B.weight")
+        key_b = key_a.replace(".lora_A.weight", ".lora_B.weight")
         if key_b not in adapter_weights:
-            skipped += 1; continue
-        raw      = key_a[len("base_model.model."):]
+            skipped += 1
+            continue
+        raw = key_a[len("base_model.model.") :]
         base_key = raw.replace(".lora_A.weight", ".weight")
         if base_key not in result:
-            skipped += 1; continue
+            skipped += 1
+            continue
         lora_A = adapter_weights[key_a].float()
         lora_B = adapter_weights[key_b].float()
-        delta  = eff_scale * (lora_B @ lora_A)
+        delta = eff_scale * (lora_B @ lora_A)
         result[base_key] = (result[base_key].float() + delta).to(result[base_key].dtype)
         applied += 1
     return result, applied, skipped
@@ -558,29 +569,31 @@ def _bake_multi_adapters(
     group_bake: dict[str, bool] | None = None,
 ) -> tuple[dict[str, torch.Tensor], int, int]:
     """複数アダプタを加重合算して焼き込む。group_bake で部分焼き込みも兼用。"""
-    result  = {k: v.clone() for k, v in base_weights.items()}
+    result = {k: v.clone() for k, v in base_weights.items()}
     applied = skipped = 0
     all_paths: set[str] = set()
     for aw in adapter_weights_list:
         for k in aw:
             if k.endswith(".lora_A.weight"):
-                all_paths.add(k[len("base_model.model."):].replace(".lora_A.weight", ""))
+                all_paths.add(k[len("base_model.model.") :].replace(".lora_A.weight", ""))
     for mod_path in all_paths:
-        key_a    = f"base_model.model.{mod_path}.lora_A.weight"
-        key_b    = f"base_model.model.{mod_path}.lora_B.weight"
+        key_a = f"base_model.model.{mod_path}.lora_A.weight"
+        key_b = f"base_model.model.{mod_path}.lora_B.weight"
         base_key = f"{mod_path}.weight"
         if base_key not in result:
-            skipped += 1; continue
+            skipped += 1
+            continue
         if group_bake is not None and not group_bake.get(_key_group(base_key), True):
-            skipped += 1; continue
+            skipped += 1
+            continue
         delta: torch.Tensor | None = None
         for aw, ac, sc in zip(adapter_weights_list, adapter_configs, adapter_scales):
             if key_a not in aw or key_b not in aw:
                 continue
-            r_i    = int(ac.get("r", 16))
-            alp_i  = float(ac.get("lora_alpha", r_i))
+            r_i = int(ac.get("r", 16))
+            alp_i = float(ac.get("lora_alpha", r_i))
             d = sc * (alp_i / r_i) * (aw[key_b].float() @ aw[key_a].float())
-            delta  = d if delta is None else delta + d
+            delta = d if delta is None else delta + d
         if delta is None:
             continue
         result[base_key] = (result[base_key].float() + delta).to(result[base_key].dtype)
@@ -590,8 +603,10 @@ def _bake_multi_adapters(
 
 def _do_bake(
     base_weights: dict[str, torch.Tensor],
-    cfgs: list[dict], wts_list: list[dict],
-    scales: list[float], group_bake: dict[str, bool] | None,
+    cfgs: list[dict],
+    wts_list: list[dict],
+    scales: list[float],
+    group_bake: dict[str, bool] | None,
 ) -> tuple[dict[str, torch.Tensor], int, int]:
     if len(wts_list) == 1 and group_bake is None:
         return _bake_single_adapter(base_weights, wts_list[0], cfgs[0], scales[0])
@@ -602,10 +617,11 @@ def _do_bake(
 # メインエントリ1: 通常LoRAマージ
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def run_lora_lora_merge(
     adapter_dir_a: str,
     adapter_dir_b: str,
-    method: str = "weighted_average",   # "weighted_average"|"slerp"|"task_arithmetic"
+    method: str = "weighted_average",  # "weighted_average"|"slerp"|"task_arithmetic"
     alpha: float = 0.5,
     lambda_a: float = 0.5,
     lambda_b: float = 0.5,
@@ -629,7 +645,10 @@ def run_lora_lora_merge(
             if not p.is_dir():
                 return False, f"❌ {label} のフォルダが見つかりません: {p}"
             if not any((p / s).is_file() for s in _ADAPTER_STATES):
-                return False, f"❌ {label}: adapter_model.safetensors / adapter_model.bin が見つかりません: {p}"
+                return (
+                    False,
+                    f"❌ {label}: adapter_model.safetensors / adapter_model.bin が見つかりません: {p}",
+                )
 
         logs.append(f"📂 アダプタA: {p_a.name}")
         logs.append(f"   バージョン: {_infer_adapter_version(p_a)}")
@@ -651,8 +670,9 @@ def run_lora_lora_merge(
         # task_arithmetic 用ベースアダプタ
         wts_base: dict[str, torch.Tensor] | None = None
         needs_base = method == "task_arithmetic" or (
-            use_partial and group_methods and
-            any(v.get("method") == "task_arithmetic" for v in group_methods.values())
+            use_partial
+            and group_methods
+            and any(v.get("method") == "task_arithmetic" for v in group_methods.values())
         )
         if needs_base:
             if not base_adapter_dir:
@@ -690,7 +710,7 @@ def run_lora_lora_merge(
             lam_a = lambda_a / total
             lam_b = lambda_b / total
             logs.append(f"⏳ Task Arithmetic でマージ中 (λA={lam_a:.3f}, λB={lam_b:.3f})...")
-            merged_wts = _lora_task_arithmetic(wts_base, wts_a, wts_b, lam_a, lam_b)
+            merged_wts = _lora_task_arithmetic(wts_base, wts_a, wts_b, lam_a, lam_b) # type: ignore
             logs.append("✅ Task Arithmetic 完了")
             method_label = "ta"
 
@@ -705,8 +725,9 @@ def run_lora_lora_merge(
 
         # 保存
         out_dir = (
-            Path(output_dir) if output_dir
-            else cnf.LORA_DIR / _make_lora_output_dirname(method_label)
+            Path(output_dir)
+            if output_dir
+            else cnfg.lora_dir / _make_lora_output_dirname(method_label)
         )
         logs.append(f"⏳ 保存中: {out_dir} ...")
         _save_lora_adapter(merged_wts, cfg_a, out_dir)
@@ -716,12 +737,14 @@ def run_lora_lora_merge(
 
     except Exception as e:
         import traceback
+
         return False, f"❌ エラー: {e}\n\n{traceback.format_exc()}"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # メインエントリ2: 本体モデルマージ（焼き込み）
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 def run_lora_merge(
     base_path: str,
@@ -777,7 +800,7 @@ def run_lora_merge(
         def _load_and_validate(dirs, scales, grp):
             cfgs_out, wts_out = [], []
             for i, (ad, sc) in enumerate(zip(dirs, scales), 1):
-                p_ad  = Path(ad)
+                p_ad = Path(ad)
                 label = f"{grp}{i}"
                 if not p_ad.is_dir():
                     return [], [], f"❌ {label} のフォルダが見つかりません: {p_ad}"
@@ -793,13 +816,15 @@ def run_lora_merge(
 
         logs.append("── アダプタA ──")
         cfgs_a, wts_a, err = _load_and_validate(adapter_dirs_a, adapter_scales_a, "アダプタA-")
-        if err: return False, err
+        if err:
+            return False, err
 
         cfgs_b, wts_b = [], []
         if adapter_dirs_b:
             logs.append("── アダプタB ──")
             cfgs_b, wts_b, err = _load_and_validate(adapter_dirs_b, adapter_scales_b, "アダプタB-")
-            if err: return False, err
+            if err:
+                return False, err
 
         logs.append("✅ バージョン互換性チェック: OK")
         logs.append("⏳ ベースモデル重みを読み込み中...")
@@ -816,13 +841,16 @@ def run_lora_merge(
         if use_post_merge and wts_b:
             gb_b = group_bake_b if use_partial_bake_b else None
             logs.append("⏳ アダプタBを焼き込み中...")
-            baked_b, app_b, skp_b = _do_bake(base_weights, cfgs_b, wts_b, adapter_scales_b, gb_b)
+            baked_b, app_b, skp_b = _do_bake(base_weights, cfgs_b, wts_b, adapter_scales_b, gb_b) # type: ignore
             logs.append(f"   焼き込み済み: {app_b}  スキップ: {skp_b}")
 
             w_base_ta: dict | None = None
             needs_ta = post_merge_method == "task_arithmetic" or (
-                use_partial and group_methods and
-                any(v.get("method") == "task_arithmetic" for v in (group_methods or {}).values())
+                use_partial
+                and group_methods
+                and any(
+                    v.get("method") == "task_arithmetic" for v in (group_methods or {}).values()
+                )
             )
             if needs_ta:
                 ta_path = Path(post_base_path) if post_base_path else p_base
@@ -831,7 +859,9 @@ def run_lora_merge(
                 cfg_ta = _load_model_config(ta_path)
                 ok_ta, mm_ta = check_config_compatibility(cfg_base, cfg_ta, "ベース", "TAベース")
                 if not ok_ta:
-                    return False, _format_compat_error(mm_ta, cfg_base, cfg_ta, "ベース", "TAベース")
+                    return False, _format_compat_error(
+                        mm_ta, cfg_base, cfg_ta, "ベース", "TAベース"
+                    )
                 w_base_ta = _load_weights(ta_path)
                 logs.append(f"📂 Task Arithmeticベース: {ta_path.name}")
 
@@ -857,7 +887,7 @@ def run_lora_merge(
                 if total <= 0:
                     return False, "❌ Task Arithmetic: lambda が 0 以下です。"
                 lam_a, lam_b = post_lambda_a / total, post_lambda_b / total
-                merged_weights = task_arithmetic(w_base_ta, baked_a, baked_b, lam_a, lam_b)
+                merged_weights = task_arithmetic(w_base_ta, baked_a, baked_b, lam_a, lam_b) # type: ignore
                 logs.append(f"✅ Task Arithmetic 完了 (λA={lam_a:.3f}, λB={lam_b:.3f})")
                 method_label = "lora_bake_ta"
             else:
@@ -866,8 +896,8 @@ def run_lora_merge(
             merged_weights = baked_a
             logs.append("✅ LoRA焼き込み完了")
 
-        suffix   = ".safetensors" if output_format == "safetensors" else ".pt"
-        out_dir  = Path(output_dir) if output_dir else cnf.CHECKPOINTS_DIR / "lora_merged"
+        suffix = ".safetensors" if output_format == "safetensors" else ".pt"
+        out_dir = Path(output_dir) if output_dir else cnfg.checkpoints_dir / "lora_merged"
         out_path = out_dir / _make_output_filename(method_label, suffix)
         logs.append(f"⏳ 保存中: {out_path} ...")
         save_merged(merged_weights, cfg_base, out_path)
@@ -878,6 +908,7 @@ def run_lora_merge(
 
     except Exception as e:
         import traceback
+
         return False, f"❌ エラー: {e}\n\n{traceback.format_exc()}"
 
 
@@ -885,9 +916,10 @@ def run_lora_merge(
 # ユーティリティ
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def scan_lora_adapters_for_merge() -> list[str]:
     """lora/ 配下のアダプタフォルダを列挙する。"""
-    lora_dir = cnf.LORA_DIR
+    lora_dir = cnfg.lora_dir
     lora_dir.mkdir(parents=True, exist_ok=True)
     result = []
     for p in sorted(lora_dir.rglob("adapter_config.json")):
@@ -906,8 +938,10 @@ def peek_adapter_version(adapter_dir: str) -> str:
 # CLI
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def main() -> None:
     import argparse, sys
+
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers(dest="cmd")
 
@@ -915,7 +949,11 @@ def main() -> None:
     p_ll = sub.add_parser("lora-merge", help="LoRAアダプタ同士をマージ")
     p_ll.add_argument("--adapter-a", required=True)
     p_ll.add_argument("--adapter-b", required=True)
-    p_ll.add_argument("--method", choices=["weighted_average","slerp","task_arithmetic"], default="weighted_average")
+    p_ll.add_argument(
+        "--method",
+        choices=["weighted_average", "slerp", "task_arithmetic"],
+        default="weighted_average",
+    )
     p_ll.add_argument("--alpha", type=float, default=0.5)
     p_ll.add_argument("--lambda-a", type=float, default=0.5)
     p_ll.add_argument("--lambda-b", type=float, default=0.5)
@@ -926,25 +964,33 @@ def main() -> None:
     p_bk = sub.add_parser("bake", help="LoRAをベースモデルに焼き込み")
     p_bk.add_argument("--base-model", required=True)
     p_bk.add_argument("--adapter-a", action="append", dest="adapters_a", default=[])
-    p_bk.add_argument("--scale-a",   action="append", dest="scales_a", type=float, default=[])
-    p_bk.add_argument("--output-format", choices=["safetensors","pt"], default="safetensors")
+    p_bk.add_argument("--scale-a", action="append", dest="scales_a", type=float, default=[])
+    p_bk.add_argument("--output-format", choices=["safetensors", "pt"], default="safetensors")
     p_bk.add_argument("--output-dir", default=None)
 
     args = parser.parse_args()
     if args.cmd == "lora-merge":
         ok, msg = run_lora_lora_merge(
-            args.adapter_a, args.adapter_b, args.method,
-            args.alpha, args.lambda_a, args.lambda_b, args.base_adapter,
+            args.adapter_a,
+            args.adapter_b,
+            args.method,
+            args.alpha,
+            args.lambda_a,
+            args.lambda_b,
+            args.base_adapter,
             output_dir=args.output_dir,
         )
     elif args.cmd == "bake":
         ok, msg = run_lora_merge(
-            args.base_model, args.adapters_a,
+            args.base_model,
+            args.adapters_a,
             args.scales_a or None,
-            output_format=args.output_format, output_dir=args.output_dir,
+            output_format=args.output_format,
+            output_dir=args.output_dir,
         )
     else:
-        parser.print_help(); sys.exit(1)
+        parser.print_help()
+        sys.exit(1)
     print(msg)
     sys.exit(0 if ok else 1)
 

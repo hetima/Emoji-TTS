@@ -52,3 +52,5 @@ logs/tensorboard/
 checkpoints/tokenizers/
 checkpoints/whisper/
 torch_hub/
+
+app_setting.json

@@ -11,6 +11,7 @@ merge.py - Irodori-TTS モデルマージユーティリティ
 
 対応形式: _ema.pt / .safetensors（推論用のみ）
 """
+
 from __future__ import annotations
 
 import json
@@ -21,7 +22,7 @@ from pathlib import Path
 from typing import Any
 import torch
 
-import gradio_conf as cnf
+from ui.setting import cnfg
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 定数
@@ -32,17 +33,24 @@ CONFIG_META_KEY = "config_json"
 
 # model_config の互換性チェック対象キー（アーキテクチャに影響するもののみ）
 ARCH_CRITICAL_KEYS = {
-    "model_dim", "num_layers", "num_heads",
-    "text_dim", "text_layers", "text_heads",
-    "speaker_dim", "speaker_layers", "speaker_heads",
-    "latent_dim", "latent_patch_size",
+    "model_dim",
+    "num_layers",
+    "num_heads",
+    "text_dim",
+    "text_layers",
+    "text_heads",
+    "speaker_dim",
+    "speaker_layers",
+    "speaker_heads",
+    "latent_dim",
+    "latent_patch_size",
 }
 
 # SLERP ゼロベクトル判定閾値
 SLERP_NORM_THRESHOLD = 1e-6
 
 # Task Arithmetic デフォルトベースモデルパス
-DEFAULT_BASE_PATH = cnf.CHECKPOINTS_DIR / "Aratako_Irodori-TTS-500M" / "model.safetensors"
+DEFAULT_BASE_PATH = cnfg.checkpoints_dir / "Aratako_Irodori-TTS-500M" / "model.safetensors"
 
 # 部分マージ グループ定義（キープレフィックス）
 LAYER_GROUPS: dict[str, list[str]] = {
@@ -66,17 +74,19 @@ LAYER_GROUPS: dict[str, list[str]] = {
 }
 
 # JointAttention 内のテキスト／話者専用キーサフィックス
-TEXT_SPECIFIC_SUFFIXES    = (".attention.wk_text", ".attention.wv_text")
+TEXT_SPECIFIC_SUFFIXES = (".attention.wk_text", ".attention.wv_text")
 SPEAKER_SPECIFIC_SUFFIXES = (".attention.wk_speaker", ".attention.wv_speaker")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # モデルロード
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def _load_weights(path: Path) -> dict[str, torch.Tensor]:
     """重み dict を返す。.pt / .safetensors 両対応。"""
     if path.suffix == ".safetensors":
         from safetensors.torch import load_file
+
         return load_file(str(path), device="cpu")
     else:
         ckpt = torch.load(str(path), map_location="cpu", weights_only=True)
@@ -92,6 +102,7 @@ def _load_model_config(path: Path) -> dict[str, Any]:
     """model_config dict を返す。.pt / .safetensors 両対応。"""
     if path.suffix == ".safetensors":
         from safetensors import safe_open
+
         with safe_open(str(path), framework="pt") as f:
             meta = f.metadata() or {}
         if CONFIG_META_KEY not in meta:
@@ -114,6 +125,7 @@ def _load_model_config(path: Path) -> dict[str, Any]:
 # model_config 互換性チェック
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def check_config_compatibility(
     cfg_a: dict[str, Any],
     cfg_b: dict[str, Any],
@@ -129,15 +141,14 @@ def check_config_compatibility(
         val_a = cfg_a.get(key)
         val_b = cfg_b.get(key)
         if val_a != val_b:
-            mismatches.append(
-                f"  {key}: {label_a}={val_a!r}  vs  {label_b}={val_b!r}"
-            )
+            mismatches.append(f"  {key}: {label_a}={val_a!r}  vs  {label_b}={val_b!r}")
     return (len(mismatches) == 0), mismatches
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # グループ判定
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 def _key_group(key: str) -> str:
     """state_dict キーがどのグループに属するかを返す。"""
@@ -160,6 +171,7 @@ def _key_group(key: str) -> str:
 # ─────────────────────────────────────────────────────────────────────────────
 # マージ手法
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 def weighted_average(
     w_a: dict[str, torch.Tensor],
@@ -295,6 +307,7 @@ def lora_inject(
 # 部分マージ（グループごとに手法を選択）
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def partial_merge(
     w_a: dict[str, torch.Tensor],
     w_b: dict[str, torch.Tensor],
@@ -319,7 +332,7 @@ def partial_merge(
 
     for key in w_a:
         group = _key_group(key)
-        cfg   = group_methods.get(group, {"method": "weighted_average", "alpha": 0.5})
+        cfg = group_methods.get(group, {"method": "weighted_average", "alpha": 0.5})
         method = cfg.get("method", "weighted_average")
 
         if key not in w_b:
@@ -363,6 +376,7 @@ def partial_merge(
 # 保存
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def _build_metadata(model_config: dict[str, Any]) -> dict[str, str]:
     """safetensors 保存用メタデータを構築する。"""
     return {
@@ -383,6 +397,7 @@ def save_merged(
 
     if output_path.suffix == ".safetensors":
         from safetensors.torch import save_file
+
         metadata = _build_metadata(model_config)
         save_file(weights, str(output_path), metadata=metadata)
     else:
@@ -402,6 +417,7 @@ def _make_output_filename(method_name: str, suffix: str) -> str:
 # エラーメッセージ整形
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def _format_compat_error(
     mismatches: list[str],
     cfg_a: dict[str, Any],
@@ -418,13 +434,13 @@ def _format_compat_error(
 
     dim_a = cfg_a.get("latent_dim")
     dim_b = cfg_b.get("latent_dim")
-    has_dim_mismatch = (dim_a is not None and dim_b is not None and dim_a != dim_b)
+    has_dim_mismatch = dim_a is not None and dim_b is not None and dim_a != dim_b
 
     ctx = f"（{context}）" if context else ""
 
     if has_dim_mismatch:
-        ver_a = _DIM_TO_VERSION.get(int(dim_a), f"unknown(dim={dim_a})")
-        ver_b = _DIM_TO_VERSION.get(int(dim_b), f"unknown(dim={dim_b})")
+        ver_a = _DIM_TO_VERSION.get(int(dim_a), f"unknown(dim={dim_a})") # type: ignore
+        ver_b = _DIM_TO_VERSION.get(int(dim_b), f"unknown(dim={dim_b})") # type: ignore
         lines = [
             f"❌ モデルバージョン互換性エラー{ctx}: v1/v2 混在のためマージ不可",
             f"   {label_a}: {ver_a}  /  {label_b}: {ver_b}",
@@ -445,16 +461,17 @@ def _format_compat_error(
 # メインエントリ（Gradio から呼び出す）
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def run_merge(
     # ── 入力モデル ──
     path_a: str,
     path_b: str,
     # ── マージ手法 ──
-    method: str,                        # "weighted_average" | "slerp" | "task_arithmetic"
-    alpha: float = 0.5,                 # WA / SLERP 用
-    lambda_a: float = 0.5,              # Task Arithmetic 用
-    lambda_b: float = 0.5,              # Task Arithmetic 用（正規化は内部で実施）
-    base_path: str | None = None,       # Task Arithmetic ベース
+    method: str,  # "weighted_average" | "slerp" | "task_arithmetic"
+    alpha: float = 0.5,  # WA / SLERP 用
+    lambda_a: float = 0.5,  # Task Arithmetic 用
+    lambda_b: float = 0.5,  # Task Arithmetic 用（正規化は内部で実施）
+    base_path: str | None = None,  # Task Arithmetic ベース
     # ── 部分マージ ──
     use_partial: bool = False,
     group_methods: dict[str, dict] | None = None,
@@ -485,27 +502,29 @@ def run_merge(
             if not lora_base_path or not lora_donor_path:
                 return False, "❌ LoRA注入: ベースパスとドナーパスを指定してください。"
 
-            p_base  = Path(lora_base_path)
+            p_base = Path(lora_base_path)
             p_donor = Path(lora_donor_path)
 
             logs.append(f"📂 LoRAベース: {p_base.name}")
             logs.append(f"📂 LoRAドナー: {p_donor.name}")
 
-            cfg_base  = _load_model_config(p_base)
+            cfg_base = _load_model_config(p_base)
             cfg_donor = _load_model_config(p_donor)
             ok, mismatches = check_config_compatibility(cfg_base, cfg_donor, "ベース", "ドナー")
             if not ok:
-                msg = _format_compat_error(mismatches, cfg_base, cfg_donor, "ベース", "ドナー", "LoRA注入")
+                msg = _format_compat_error(
+                    mismatches, cfg_base, cfg_donor, "ベース", "ドナー", "LoRA注入"
+                )
                 return False, msg
 
-            w_base  = _load_weights(p_base)
+            w_base = _load_weights(p_base)
             w_donor = _load_weights(p_donor)
             target_groups = lora_target_groups or list(LAYER_GROUPS.keys())
             weights = lora_inject(w_base, w_donor, lora_scale, target_groups)
             model_config = cfg_base
 
             suffix = ".safetensors" if output_format == "safetensors" else ".pt"
-            out_dir = Path(output_dir) if output_dir else cnf.CHECKPOINTS_DIR / "merged"
+            out_dir = Path(output_dir) if output_dir else cnfg.checkpoints_dir / "merged"
             out_path = out_dir / _make_output_filename("lora_inject", suffix)
             save_merged(weights, model_config, out_path)
             logs.append(f"✅ LoRA注入完了 → {out_path}")
@@ -532,9 +551,7 @@ def run_merge(
         # ── 部分マージ ────────────────────────────────────────────────
         if use_partial and group_methods:
             # Task Arithmetic を使うグループがあればベースモデルが必要
-            needs_base = any(
-                v.get("method") == "task_arithmetic" for v in group_methods.values()
-            )
+            needs_base = any(v.get("method") == "task_arithmetic" for v in group_methods.values())
             w_base_partial: dict[str, torch.Tensor] | None = None
             if needs_base:
                 bp = Path(base_path) if base_path else DEFAULT_BASE_PATH
@@ -587,7 +604,9 @@ def run_merge(
             cfg_base = _load_model_config(bp)
             ok_b, mm_b = check_config_compatibility(cfg_a, cfg_base, "モデルA", "ベース")
             if not ok_b:
-                return False, _format_compat_error(mm_b, cfg_a, cfg_base, "モデルA", "ベース", "Task Arithmetic ベース")
+                return False, _format_compat_error(
+                    mm_b, cfg_a, cfg_base, "モデルA", "ベース", "Task Arithmetic ベース"
+                )
 
             w_base = _load_weights(bp)
             weights = task_arithmetic(w_base, w_a, w_b, lam_a_norm, lam_b_norm)
@@ -599,7 +618,7 @@ def run_merge(
 
         # 保存
         suffix = ".safetensors" if output_format == "safetensors" else ".pt"
-        out_dir = Path(output_dir) if output_dir else cnf.CHECKPOINTS_DIR / "merged"
+        out_dir = Path(output_dir) if output_dir else cnfg.checkpoints_dir / "merged"
         out_path = out_dir / _make_output_filename(method_label, suffix)
         save_merged(weights, cfg_a, out_path)
 
@@ -610,6 +629,7 @@ def run_merge(
 
     except Exception as e:
         import traceback
+
         return False, f"❌ エラー: {e}\n\n{traceback.format_exc()}"
 
 
@@ -617,16 +637,19 @@ def run_merge(
 # ユーティリティ（Gradio UI から使用）
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def scan_checkpoints_for_merge() -> list[str]:
     """checkpoints/ 配下の .pt / .safetensors を列挙（codecs・tokenizers 除外）。"""
-    cnf.CHECKPOINTS_DIR.mkdir(parents=True, exist_ok=True)
-    candidates = sorted([
-        *cnf.CHECKPOINTS_DIR.glob("**/*.pt"),
-        *cnf.CHECKPOINTS_DIR.glob("**/*.safetensors"),
-    ])
+    cnfg.checkpoints_dir.mkdir(parents=True, exist_ok=True)
+    candidates = sorted(
+        [
+            *cnfg.checkpoints_dir.glob("**/*.pt"),
+            *cnfg.checkpoints_dir.glob("**/*.safetensors"),
+        ]
+    )
     result = []
     for p in candidates:
-        parts = p.relative_to(cnf.CHECKPOINTS_DIR).parts
+        parts = p.relative_to(cnfg.checkpoints_dir).parts
         if parts[0] in {"codecs", "tokenizers"}:
             continue
         result.append(str(p))

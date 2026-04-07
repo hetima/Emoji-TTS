@@ -9,7 +9,7 @@ from pathlib import Path
 
 import gradio as gr
 
-import gradio_conf as cnf
+from .setting import cnfg
 
 from ui.common import *
 from ui.context import UIContext
@@ -51,15 +51,25 @@ def _build_dataset_command(
     manifest_path = str(Path(manifest_output_dir) / f"{manifest_filename}.{fmt_ext}")
 
     if mode == "スライスのみ":
-        cmd = [sys.executable, str(cnf.DATASET_TOOLS), "slice",
-               "--input", input_path,
-               "--output", slice_output,
-               "--min-sec", str(min_sec),
-               "--max-sec", str(max_sec),
-               "--threshold", str(threshold),
-               "--min-silence-ms", str(int(min_silence_ms)),
-               "--speech-pad-ms",  str(int(speech_pad_ms)),
-               ]
+        cmd = [
+            sys.executable,
+            str(cnfg.dataset_tools),
+            "slice",
+            "--input",
+            input_path,
+            "--output",
+            slice_output,
+            "--min-sec",
+            str(min_sec),
+            "--max-sec",
+            str(max_sec),
+            "--threshold",
+            str(threshold),
+            "--min-silence-ms",
+            str(int(min_silence_ms)),
+            "--speech-pad-ms",
+            str(int(speech_pad_ms)),
+        ]
         if target_sr_enabled and int(target_sr) > 0:
             cmd += ["--target-sr", str(int(target_sr))]
         if str(device).strip() and device != "自動":
@@ -69,12 +79,19 @@ def _build_dataset_command(
 
     elif mode == "キャプションのみ":
         lang = "" if language in ("自動検出", "auto", "") else language
-        cmd = [sys.executable, str(cnf.DATASET_TOOLS), "caption",
-               "--input", caption_input,
-               "--output-manifest", manifest_path,
-               "--format", fmt_ext,
-               "--model", whisper_model,
-               ]
+        cmd = [
+            sys.executable,
+            str(cnfg.dataset_tools),
+            "caption",
+            "--input",
+            caption_input,
+            "--output-manifest",
+            manifest_path,
+            "--format",
+            fmt_ext,
+            "--model",
+            whisper_model,
+        ]
         if lang:
             cmd += ["--language", lang]
         if str(speaker_id).strip():
@@ -88,18 +105,31 @@ def _build_dataset_command(
 
     else:
         lang = "" if language in ("自動検出", "auto", "") else language
-        cmd = [sys.executable, str(cnf.DATASET_TOOLS), "pipeline",
-               "--input", input_path,
-               "--slice-output", slice_output,
-               "--output-manifest", manifest_path,
-               "--format", fmt_ext,
-               "--min-sec", str(min_sec),
-               "--max-sec", str(max_sec),
-               "--threshold", str(threshold),
-               "--min-silence-ms", str(int(min_silence_ms)),
-               "--speech-pad-ms",  str(int(speech_pad_ms)),
-               "--model", whisper_model,
-               ]
+        cmd = [
+            sys.executable,
+            str(cnfg.dataset_tools),
+            "pipeline",
+            "--input",
+            input_path,
+            "--slice-output",
+            slice_output,
+            "--output-manifest",
+            manifest_path,
+            "--format",
+            fmt_ext,
+            "--min-sec",
+            str(min_sec),
+            "--max-sec",
+            str(max_sec),
+            "--threshold",
+            str(threshold),
+            "--min-silence-ms",
+            str(int(min_silence_ms)),
+            "--speech-pad-ms",
+            str(int(speech_pad_ms)),
+            "--model",
+            whisper_model,
+        ]
         if target_sr_enabled and int(target_sr) > 0:
             cmd += ["--target-sr", str(int(target_sr))]
         if lang:
@@ -122,11 +152,11 @@ def _start_dataset_job(*args) -> tuple[str, str]:
             return "別のジョブが実行中です。停止してから再実行してください。", ""
 
     cmd_list = _build_dataset_command(*args)
-    cmd_str  = " ".join(cmd_list)
+    cmd_str = " ".join(cmd_list)
 
-    cnf.LOGS_DIR.mkdir(parents=True, exist_ok=True)
-    stamp    = datetime.now().strftime("%Y%m%d_%H%M%S")
-    log_path = cnf.LOGS_DIR / f"dataset_{stamp}.log"
+    cnfg.logs_dir.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_path = cnfg.logs_dir / f"dataset_{stamp}.log"
 
     with _DS_LOG_LOCK:
         _DS_LOG_PATH = log_path
@@ -134,14 +164,21 @@ def _start_dataset_job(*args) -> tuple[str, str]:
         env["PYTHONUTF8"] = "1"
         env["PYTHONIOENCODING"] = "utf-8"
         proc = subprocess.Popen(
-            cmd_list, shell=False, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            text=True, bufsize=1, encoding="utf-8", errors="replace", env=env,
+            cmd_list,
+            shell=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+            encoding="utf-8",
+            errors="replace",
+            env=env,
         )
         _DS_PROC = proc
 
     def _stream():
         with open(log_path, "w", encoding="utf-8") as f:
-            for line in proc.stdout: # type: ignore
+            for line in proc.stdout:  # type: ignore
                 f.write(line)
                 f.flush()
         proc.wait()
@@ -175,8 +212,6 @@ def _read_dataset_log() -> str:
     return text
 
 
-
-
 # ─────────────────────────────
 # 絵文字キャプション ロジック
 # ─────────────────────────────
@@ -195,7 +230,7 @@ _EMOJI_DEFAULT_MODELS = {
 }
 
 
-def _append_emoji_to_ds_log(log_path: Path|None, message: str) -> None:
+def _append_emoji_to_ds_log(log_path: Path | None, message: str) -> None:
     if log_path != None:
         try:
             with open(log_path, "a", encoding="utf-8") as f:
@@ -216,10 +251,15 @@ def _run_emoji_caption_inline(
     api_key_str = _EMOJI_API_KEYS.get(api_label, "lm_studio")
 
     cmd = [
-        sys.executable, str(cnf.DATASET_TOOLS), "emoji_caption",
-        "--csv",     str(csv_path).strip(),
-        "--wav-dir", str(wav_dir).strip(),
-        "--api",     api_key_str,
+        sys.executable,
+        str(cnfg.dataset_tools),
+        "emoji_caption",
+        "--csv",
+        str(csv_path).strip(),
+        "--wav-dir",
+        str(wav_dir).strip(),
+        "--api",
+        api_key_str,
     ]
     if api_key_str != "lm_studio" and str(api_key).strip():
         cmd += ["--api-key", str(api_key).strip()]
@@ -230,19 +270,25 @@ def _run_emoji_caption_inline(
 
     with _DS_LOG_LOCK:
         log_path = _DS_LOG_PATH
-        _append_emoji_to_ds_log(log_path, f"\n{'='*60}")
+        _append_emoji_to_ds_log(log_path, f"\n{'=' * 60}")
         _append_emoji_to_ds_log(log_path, "🎭 絵文字キャプション開始")
-        _append_emoji_to_ds_log(log_path, f"{'='*60}")
+        _append_emoji_to_ds_log(log_path, f"{'=' * 60}")
         proc = subprocess.Popen(
-            cmd, shell=False,
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            text=True, bufsize=1, encoding="utf-8", errors="replace", env=env,
+            cmd,
+            shell=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+            encoding="utf-8",
+            errors="replace",
+            env=env,
         )
         _DS_PROC = proc
 
     def _stream():
-        with open(log_path, "a", encoding="utf-8") as f: # type: ignore
-            for line in proc.stdout: # type: ignore
+        with open(log_path, "a", encoding="utf-8") as f:  # type: ignore
+            for line in proc.stdout:  # type: ignore
                 f.write(line)
                 f.flush()
         proc.wait()
@@ -251,9 +297,11 @@ def _run_emoji_caption_inline(
 
     threading.Thread(target=_stream, daemon=True).start()
 
+
 # ─────────────────────────────
 # UI 生成
 # ─────────────────────────────
+
 
 def build(ctx: UIContext):
     with gr.Tab("🎙️ Dataset作成"):
@@ -277,15 +325,15 @@ def build(ctx: UIContext):
             with gr.Row():
                 ds_input = gr.Textbox(
                     label="入力パス（ファイルまたはフォルダ）",
-                    value=str(cnf.BASE_DIR / "input"),
+                    value=str(cnfg.base_dir / "input"),
                     placeholder="/path/to/audio_or_folder",
                     scale=3,
                 )
                 ds_recursive_slice = gr.Checkbox(label="サブフォルダも検索", value=False, scale=1)
             ds_slice_output = gr.Textbox(
                 label="スライス済み音声の保存先フォルダ",
-                value=str(cnf.DEFAULT_DATASET_DIR),
-                placeholder=str(cnf.DEFAULT_DATASET_DIR),
+                value=str(cnfg.default_dataset_dir),
+                placeholder=str(cnfg.default_dataset_dir),
             )
             with gr.Row():
                 ds_min_sec = gr.Number(
@@ -329,8 +377,8 @@ def build(ctx: UIContext):
             )
             ds_caption_input = gr.Textbox(
                 label="キャプション対象フォルダ（キャプションのみモード時に使用）",
-                value=str(cnf.DEFAULT_DATASET_DIR),
-                placeholder=str(cnf.DEFAULT_DATASET_DIR),
+                value=str(cnfg.default_dataset_dir),
+                placeholder=str(cnfg.default_dataset_dir),
                 info="パイプラインモード時はスライス出力先が自動的に使われます。",
             )
             with gr.Row():
@@ -360,7 +408,7 @@ def build(ctx: UIContext):
                 ds_recursive_caption = gr.Checkbox(label="サブフォルダも検索", value=False, scale=1)
             ds_model_cache_dir = gr.Textbox(
                 label="Whisperモデルキャッシュフォルダ",
-                value=str(cnf.CHECKPOINTS_DIR / "whisper"),
+                value=str(cnfg.checkpoints_dir / "whisper"),
                 info="モデルが存在しない場合は自動ダウンロードされます。空欄にするとHFデフォルト (~/.cache/huggingface/hub) に保存されます。",
             )
 
@@ -415,8 +463,8 @@ def build(ctx: UIContext):
             with gr.Row():
                 ds_manifest_output_dir = gr.Textbox(
                     label="manifest保存先フォルダ",
-                    value=str(cnf.DEFAULT_DATASET_DIR),
-                    placeholder=str(cnf.DEFAULT_DATASET_DIR),
+                    value=str(cnfg.default_dataset_dir),
+                    placeholder=str(cnfg.default_dataset_dir),
                     scale=3,
                 )
                 ds_manifest_filename = gr.Textbox(

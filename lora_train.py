@@ -4,6 +4,7 @@
 train.py をベースとして LoRA 差分学習に特化。
 peft ライブラリを使用し、操作面・引数仕様を train.py に最大限準拠。
 """
+
 from __future__ import annotations
 
 import argparse
@@ -63,12 +64,12 @@ from train import (
     validate_text_backbone_dim,
 )
 
-import gradio_conf as cnf
+from ui.setting import cnfg
 
 WANDB_MODES = {"online", "offline", "disabled"}
 
 # LoRAデフォルト出力先
-_DEFAULT_LORA_DIR = cnf.LORA_DIR
+_DEFAULT_LORA_DIR = cnfg.lora_dir
 
 # pyファイル基準のcheckpointsフォルダ
 _PROJECT_CHECKPOINTS_DIR = Path(__file__).resolve().parent / "checkpoints"
@@ -77,10 +78,17 @@ _HF_TOKENIZER_CACHE_DIR = _PROJECT_CHECKPOINTS_DIR / "tokenizers"
 # LoRAターゲットモジュール
 DEFAULT_TARGET_MODULES = ["wq", "wk", "wv", "wo"]
 EXTENDED_TARGET_MODULES = [
-    "wq", "wk", "wv", "wo",         # JointAttention コア
-    "wk_text", "wv_text",           # テキスト KV 投影
-    "wk_speaker", "wv_speaker",     # 話者 KV 投影
-    "w1", "w2", "w3",               # SwiGLU MLP
+    "wq",
+    "wk",
+    "wv",
+    "wo",  # JointAttention コア
+    "wk_text",
+    "wv_text",  # テキスト KV 投影
+    "wk_speaker",
+    "wv_speaker",  # 話者 KV 投影
+    "w1",
+    "w2",
+    "w3",  # SwiGLU MLP
 ]
 
 LORA_CHECKPOINT_STEP_RE = re.compile(r"^lora_checkpoint_(\d+)_(ema|full)$")
@@ -89,6 +97,7 @@ LORA_CHECKPOINT_STEP_RE = re.compile(r"^lora_checkpoint_(\d+)_(ema|full)$")
 # ---------------------------------------------------------------------------
 # LoRA チェックポイント保存
 # ---------------------------------------------------------------------------
+
 
 def save_lora_checkpoint(
     output_dir: Path,
@@ -146,6 +155,7 @@ def save_lora_checkpoint(
 
         # train_state.json
         import hashlib
+
         base_sha256 = ""
         try:
             bp = Path(base_model_path)
@@ -261,30 +271,41 @@ def _load_base_model(base_model_path: str, device: torch.device) -> tuple[TextTo
 # メイン
 # ---------------------------------------------------------------------------
 
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="LoRA fine-tuning for Irodori-TTS.")
 
     # ── LoRA固有引数 ──────────────────────────────────────────────
-    parser.add_argument("--base-model", required=True,
-                        help="ベースモデルパス (.pt または .safetensors)。必須。")
-    parser.add_argument("--lora-rank", type=int, default=16,
-                        help="LoRA ランク (デフォルト: 16)。")
-    parser.add_argument("--lora-alpha", type=float, default=32.0,
-                        help="LoRA スケール (デフォルト: 32)。")
-    parser.add_argument("--lora-dropout", type=float, default=0.05,
-                        help="LoRA ドロップアウト率 (デフォルト: 0.05)。")
-    parser.add_argument("--target-modules", default="wq,wk,wv,wo",
-                        help="LoRA適用モジュール カンマ区切り (デフォルト: wq,wk,wv,wo)。")
-    parser.add_argument("--run-name", default=None,
-                        help="出力サブフォルダ名 (デフォルト: タイムスタンプ自動生成)。")
-    parser.add_argument("--resume-lora", default=None,
-                        help="既存 _full フォルダパスを指定して Resume。")
+    parser.add_argument(
+        "--base-model", required=True, help="ベースモデルパス (.pt または .safetensors)。必須。"
+    )
+    parser.add_argument("--lora-rank", type=int, default=16, help="LoRA ランク (デフォルト: 16)。")
+    parser.add_argument(
+        "--lora-alpha", type=float, default=32.0, help="LoRA スケール (デフォルト: 32)。"
+    )
+    parser.add_argument(
+        "--lora-dropout",
+        type=float,
+        default=0.05,
+        help="LoRA ドロップアウト率 (デフォルト: 0.05)。",
+    )
+    parser.add_argument(
+        "--target-modules",
+        default="wq,wk,wv,wo",
+        help="LoRA適用モジュール カンマ区切り (デフォルト: wq,wk,wv,wo)。",
+    )
+    parser.add_argument(
+        "--run-name", default=None, help="出力サブフォルダ名 (デフォルト: タイムスタンプ自動生成)。"
+    )
+    parser.add_argument(
+        "--resume-lora", default=None, help="既存 _full フォルダパスを指定して Resume。"
+    )
 
     # ── train.py 共通引数 ─────────────────────────────────────────
-    parser.add_argument("--manifest", required=True,
-                        help="JSONL マニフェストファイルパス。")
-    parser.add_argument("--output-dir", default=None,
-                        help=f"LoRA出力フォルダ (デフォルト: lora/{{run_name}}/)。")
+    parser.add_argument("--manifest", required=True, help="JSONL マニフェストファイルパス。")
+    parser.add_argument(
+        "--output-dir", default=None, help=f"LoRA出力フォルダ (デフォルト: lora/{{run_name}}/)。"
+    )
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--precision", choices=["fp32", "bf16"], default="bf16")
     parser.add_argument("--batch-size", type=int, default=4)
@@ -293,7 +314,9 @@ def main() -> None:
     parser.add_argument("--num-workers", type=int, default=2)
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--weight-decay", type=float, default=0.01)
-    parser.add_argument("--optimizer", choices=["adamw", "muon", "lion", "ademamix", "sgd"], default="adamw")
+    parser.add_argument(
+        "--optimizer", choices=["adamw", "muon", "lion", "ademamix", "sgd"], default="adamw"
+    )
     parser.add_argument("--adam-beta1", type=float, default=0.9)
     parser.add_argument("--adam-beta2", type=float, default=0.999)
     parser.add_argument("--adam-eps", type=float, default=1e-8)
@@ -312,10 +335,15 @@ def main() -> None:
     parser.add_argument("--early-stopping-min-delta", type=float, default=0.01)
     parser.add_argument("--ema-decay", type=float, default=None)
     parser.add_argument("--clip-grad-norm", type=float, default=1.0)
-    parser.add_argument("--save-full", action="store_true", default=False,
-                        help="EMA版に加えてフル版 (_full/) も保存する。Resume前提の学習時に指定。")
-    parser.add_argument("--attention-backend",
-                        choices=["sdpa", "flash2", "sage", "eager"], default="sdpa")
+    parser.add_argument(
+        "--save-full",
+        action="store_true",
+        default=False,
+        help="EMA版に加えてフル版 (_full/) も保存する。Resume前提の学習時に指定。",
+    )
+    parser.add_argument(
+        "--attention-backend", choices=["sdpa", "flash2", "sage", "eager"], default="sdpa"
+    )
     parser.add_argument("--grad-checkpoint", action="store_true", default=False)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--text-condition-dropout", type=float, default=0.1)
@@ -426,7 +454,7 @@ def main() -> None:
             target_modules=target_modules,
             bias="none",
         )
-        model = get_peft_model(raw_model, lora_config)
+        model = get_peft_model(raw_model, lora_config) # type: ignore
 
     model.print_trainable_parameters()
     model = model.to(device)
@@ -593,7 +621,9 @@ def main() -> None:
         if args.resume_lora:
             shadow_path = Path(args.resume_lora) / "ema_shadow.pt"
             if shadow_path.exists():
-                ema_model.shadow = torch.load(str(shadow_path), map_location="cpu", weights_only=True)
+                ema_model.shadow = torch.load(
+                    str(shadow_path), map_location="cpu", weights_only=True
+                )
                 print("EMA shadow重みを復元しました。")
 
         print(f"EMA有効 (decay={args.ema_decay})")
@@ -615,6 +645,7 @@ def main() -> None:
     if args.wandb_enabled:
         try:
             import wandb
+
             wandb_run = wandb.init(
                 project=args.wandb_project,
                 entity=args.wandb_entity,
@@ -630,7 +661,9 @@ def main() -> None:
             )
             print(f"W&B 有効: project={args.wandb_project}")
         except ImportError as exc:
-            raise RuntimeError("wandb が未インストールです。`pip install wandb` を実行してください。") from exc
+            raise RuntimeError(
+                "wandb が未インストールです。`pip install wandb` を実行してください。"
+            ) from exc
 
     # ── 学習ループ ─────────────────────────────────────────────────
     accum_steps = args.gradient_accumulation_steps
@@ -651,11 +684,13 @@ def main() -> None:
 
     import time as _time
 
-    _step_times: list[float] = []   # 直近ステップの完了時刻（最大100件）
-    _MAX_TIME_WINDOW = 100           # 移動平均の窓サイズ
+    _step_times: list[float] = []  # 直近ステップの完了時刻（最大100件）
+    _MAX_TIME_WINDOW = 100  # 移動平均の窓サイズ
 
     try:
-        while step < args.max_steps and not (early_stopper is not None and early_stopper.should_stop):
+        while step < args.max_steps and not (
+            early_stopper is not None and early_stopper.should_stop
+        ):
             epoch += 1
             for batch in loader:
                 accum_micro_steps += 1
@@ -672,15 +707,21 @@ def main() -> None:
                 bsz = x0.shape[0]
                 if args.timestep_stratified:
                     t = sample_stratified_logit_normal_t(
-                        batch_size=bsz, device=device,
-                        mean=train_cfg.timestep_logit_mean, std=train_cfg.timestep_logit_std,
-                        t_min=train_cfg.timestep_min, t_max=train_cfg.timestep_max,
+                        batch_size=bsz,
+                        device=device,
+                        mean=train_cfg.timestep_logit_mean,
+                        std=train_cfg.timestep_logit_std,
+                        t_min=train_cfg.timestep_min,
+                        t_max=train_cfg.timestep_max,
                     )
                 else:
                     t = sample_logit_normal_t(
-                        batch_size=bsz, device=device,
-                        mean=train_cfg.timestep_logit_mean, std=train_cfg.timestep_logit_std,
-                        t_min=train_cfg.timestep_min, t_max=train_cfg.timestep_max,
+                        batch_size=bsz,
+                        device=device,
+                        mean=train_cfg.timestep_logit_mean,
+                        std=train_cfg.timestep_logit_std,
+                        t_min=train_cfg.timestep_min,
+                        t_max=train_cfg.timestep_max,
                     )
 
                 noise = torch.randn_like(x0)
@@ -701,19 +742,25 @@ def main() -> None:
 
                 with (
                     torch.autocast(device_type="cuda", dtype=torch.bfloat16)
-                    if use_bf16 else nullcontext()
+                    if use_bf16
+                    else nullcontext()
                 ):
                     v_pred = model(
-                        x_t=x_t, t=t,
-                        text_input_ids=text_ids, text_mask=text_mask,
-                        ref_latent=ref_latent, ref_mask=ref_mask,
+                        x_t=x_t,
+                        t=t,
+                        text_input_ids=text_ids,
+                        text_mask=text_mask,
+                        ref_latent=ref_latent,
+                        ref_mask=ref_mask,
                         latent_mask=x_mask,
                     )
 
                 v_pred = v_pred.float()
                 loss = echo_style_masked_mse(
-                    v_pred, v_target.float(),
-                    loss_mask=x_mask, valid_mask=x_mask_valid,
+                    v_pred,
+                    v_target.float(),
+                    loss_mask=x_mask,
+                    valid_mask=x_mask_valid,
                 )
                 (loss / float(accum_steps)).backward()
                 accum_loss += loss.detach()
@@ -749,6 +796,7 @@ def main() -> None:
                         sec_per_step = elapsed / n_intervals
                         remaining_steps = args.max_steps - step
                         eta_sec = sec_per_step * remaining_steps
+
                         # 〇時間〇分〇秒 形式でフォーマット
                         def _fmt_eta(s):
                             s = int(s)
@@ -760,8 +808,11 @@ def main() -> None:
                                 return f"{m}分{sec}秒"
                             else:
                                 return f"{sec}秒"
-                        speed_str = f"{1.0/sec_per_step:.3f}steps/s" if sec_per_step > 0 else "?"
-                        print(f"step={step} loss={step_loss:.6f} lr={lr_val:.3e} speed={speed_str} eta={_fmt_eta(eta_sec)}")
+
+                        speed_str = f"{1.0 / sec_per_step:.3f}steps/s" if sec_per_step > 0 else "?"
+                        print(
+                            f"step={step} loss={step_loss:.6f} lr={lr_val:.3e} speed={speed_str} eta={_fmt_eta(eta_sec)}"
+                        )
                     else:
                         print(f"step={step} loss={step_loss:.6f} lr={lr_val:.3e}")
                     if wandb_run is not None:
@@ -770,20 +821,28 @@ def main() -> None:
                 if step % args.save_every == 0:
                     print(f"チェックポイント保存中 (step={step})...")
                     save_lora_checkpoint(
-                        output_dir=output_dir, model=model,
-                        optimizer=optimizer, scheduler=scheduler, step=step,
+                        output_dir=output_dir,
+                        model=model,
+                        optimizer=optimizer,
+                        scheduler=scheduler,
+                        step=step,
                         base_model_path=args.base_model,
                         base_model_cfg=base_model_cfg_dict,
                         lora_cfg_dict=lora_cfg_dict,
-                        train_cfg=train_cfg, ema_model=ema_model,
+                        train_cfg=train_cfg,
+                        ema_model=ema_model,
                         save_full=args.save_full,
                     )
                     print(f"チェックポイント保存完了: step={step}")
 
                 if has_validation and step % args.valid_every == 0:
                     valid_metrics = run_validation(
-                        model=model, loader=valid_loader, train_cfg=train_cfg,
-                        device=device, use_bf16=use_bf16, distributed=False,
+                        model=model,
+                        loader=valid_loader,
+                        train_cfg=train_cfg,
+                        device=device,
+                        use_bf16=use_bf16,
+                        distributed=False,
                     )
                     v_loss = valid_metrics["loss"]
                     print(f"valid step={step} loss={v_loss:.6f}")
@@ -796,7 +855,9 @@ def main() -> None:
 
                     if early_stopper is not None:
                         if early_stopper.step(score=v_loss, current_step=step):
-                            print(f"Early Stopping: best step={early_stopper.best_step} loss={early_stopper.best_score:.6f}")
+                            print(
+                                f"Early Stopping: best step={early_stopper.best_step} loss={early_stopper.best_score:.6f}"
+                            )
                             break
 
                 if step >= args.max_steps:

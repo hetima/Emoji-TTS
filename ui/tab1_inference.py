@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 import json
 import gradio as gr
-import gradio_conf as cnf
+from .setting import cnfg
 
 from ui.common import *
 
@@ -11,12 +11,12 @@ from ui.common import *
 # スピーカーライブラリ ユーティリティ
 # ─────────────────────────────
 
+
 def _scan_speakers() -> list[str]:
     """speakers/ 配下のキャラクター名を列挙（ref.pt が存在するフォルダのみ）。"""
-    cnf.SPEAKERS_DIR.mkdir(parents=True, exist_ok=True)
+    cnfg.speakers_dir.mkdir(parents=True, exist_ok=True)
     return ["（使用しない）"] + sorted(
-        d.name for d in cnf.SPEAKERS_DIR.iterdir()
-        if d.is_dir() and (d / "ref.pt").exists()
+        d.name for d in cnfg.speakers_dir.iterdir() if d.is_dir() and (d / "ref.pt").exists()
     )
 
 
@@ -45,30 +45,41 @@ def _run_create_speaker(
     # キャッシュ未ロードの場合はエラーを返す。
     # キャッシュ済みの場合は codec_repo も含めてそのまま流用する。
     from irodori_tts.inference_runtime import _RUNTIME_CACHE_KEY, _RUNTIME_CACHE_VALUE
+
     _cached_runtime = _RUNTIME_CACHE_VALUE
     _cached_key = _RUNTIME_CACHE_KEY
 
     if _cached_runtime is None:
         return (
-            "エラー: モデルが読み込まれていません。\n"
-            "先に「モデル読み込み」ボタンを押してください。"
+            "エラー: モデルが読み込まれていません。\n先に「モデル読み込み」ボタンを押してください。"
         )
 
     # checkpoint / device / precision の一致確認（codec_repo はキャッシュから自動使用）
     try:
         runtime_key = _build_runtime_key(
-            checkpoint, model_device, model_precision,
-            codec_device, codec_precision, False, "（なし）",
-            codec_repo=_cached_key.codec_repo, # type: ignore
+            checkpoint,
+            model_device,
+            model_precision,
+            codec_device,
+            codec_precision,
+            False,
+            "（なし）",
+            codec_repo=_cached_key.codec_repo,  # type: ignore
         )
     except Exception as e:
         return f"エラー: チェックポイントパスが無効です。\n{e}"
 
-    _codec_fields = ("checkpoint", "model_device", "codec_repo", "model_precision",
-                     "codec_device", "codec_precision", "enable_watermark")
+    _codec_fields = (
+        "checkpoint",
+        "model_device",
+        "codec_repo",
+        "model_precision",
+        "codec_device",
+        "codec_precision",
+        "enable_watermark",
+    )
     _mismatch = [
-        f for f in _codec_fields
-        if getattr(_cached_key, f, None) != getattr(runtime_key, f, None)
+        f for f in _codec_fields if getattr(_cached_key, f, None) != getattr(runtime_key, f, None)
     ]
     if _mismatch:
         return (
@@ -106,7 +117,7 @@ def _run_create_speaker(
     except Exception as e:
         return f"エラー: DACVAEエンコード失敗: {e}"
 
-    out_dir = cnf.SPEAKERS_DIR / char_name
+    out_dir = cnfg.speakers_dir / char_name
     out_dir.mkdir(parents=True, exist_ok=True)
 
     shutil.copy2(wav_path, out_dir / "ref.wav")
@@ -128,11 +139,10 @@ def _run_create_speaker(
     msg = f"✅ 登録完了: speakers/{char_name}/\n"
     msg += f"  ref.wav / ref.pt / profile.json\n"
     msg += f"  潜在 shape: {tuple(latent.shape)}  ({duration_sec}秒)\n"
-    msg += f"  使用モデル: {version_label} (latent_dim={ldim}, codec={_cached_key.codec_repo})" # type: ignore
+    msg += f"  使用モデル: {version_label} (latent_dim={ldim}, codec={_cached_key.codec_repo})"  # type: ignore
     if trimmed:
         msg += "\n  （30秒にトリム済み）"
     return msg
-
 
 
 # ─────────────────────────────
@@ -144,23 +154,35 @@ def _on_model_device_change(device: str) -> gr.Dropdown:
     choices = precision_choices_for_device(device)
     return gr.Dropdown(choices=choices, value=choices[0])
 
+
 def _on_codec_device_change(device: str) -> gr.Dropdown:
     choices = precision_choices_for_device(device)
     return gr.Dropdown(choices=choices, value=choices[0])
 
+
 def _parse_optional_float(raw: str | None, label: str) -> float | None:
-    if raw is None: return None
+    if raw is None:
+        return None
     text = str(raw).strip()
-    if text == "" or text.lower() == "none": return None
-    try: return float(text)
-    except ValueError as exc: raise ValueError(f"{label} must be a float or blank.") from exc
+    if text == "" or text.lower() == "none":
+        return None
+    try:
+        return float(text)
+    except ValueError as exc:
+        raise ValueError(f"{label} must be a float or blank.") from exc
+
 
 def _parse_optional_int(raw: str | None, label: str) -> int | None:
-    if raw is None: return None
+    if raw is None:
+        return None
     text = str(raw).strip()
-    if text == "" or text.lower() == "none": return None
-    try: return int(text)
-    except ValueError as exc: raise ValueError(f"{label} must be an int or blank.") from exc
+    if text == "" or text.lower() == "none":
+        return None
+    try:
+        return int(text)
+    except ValueError as exc:
+        raise ValueError(f"{label} must be an int or blank.") from exc
+
 
 def _format_timings(stage_timings: list[tuple[str, float]], total_to_decode: float) -> str:
     lines = [
@@ -169,6 +191,7 @@ def _format_timings(stage_timings: list[tuple[str, float]], total_to_decode: flo
         f"[timing] total_to_decode: {total_to_decode:.3f} s",
     ]
     return "\n".join(lines)
+
 
 def _resolve_checkpoint_path_infer(raw_checkpoint: str) -> str:
     checkpoint = str(raw_checkpoint).strip()
@@ -181,14 +204,17 @@ def _resolve_checkpoint_path_infer(raw_checkpoint: str) -> str:
         return checkpoint
     raise ValueError(f"サポートされていないファイル形式: {suffix}")
 
+
 def _peek_latent_dim_from_checkpoint(checkpoint_path: str) -> int | None:
     """チェックポイントを軽量に読み取りlatent_dimを返す。失敗時はNone。"""
     try:
         from pathlib import Path as _Path
         import json as _json
+
         p = _Path(checkpoint_path)
         if p.suffix.lower() == ".safetensors":
             from safetensors import safe_open as _safe_open
+
             with _safe_open(str(p), framework="pt", device="cpu") as h:
                 meta = h.metadata() or {}
             cfg_raw = meta.get("config_json")
@@ -197,6 +223,7 @@ def _peek_latent_dim_from_checkpoint(checkpoint_path: str) -> int | None:
                 return int(cfg["latent_dim"])
         else:
             import torch as _torch
+
             ckpt = _torch.load(str(p), map_location="cpu", weights_only=True)
             model_cfg = ckpt.get("model_config", {})
             if "latent_dim" in model_cfg:
@@ -205,7 +232,17 @@ def _peek_latent_dim_from_checkpoint(checkpoint_path: str) -> int | None:
         pass
     return None
 
-def _build_runtime_key(checkpoint, model_device, model_precision, codec_device, codec_precision, enable_watermark, lora_adapter="（なし）", codec_repo="Aratako/Semantic-DACVAE-Japanese-32dim"):
+
+def _build_runtime_key(
+    checkpoint,
+    model_device,
+    model_precision,
+    codec_device,
+    codec_precision,
+    enable_watermark,
+    lora_adapter="（なし）",
+    codec_repo="Aratako/Semantic-DACVAE-Japanese-32dim",
+):
     checkpoint_path = _resolve_checkpoint_path_infer(checkpoint)
     lora_path = None
     if str(lora_adapter).strip() and str(lora_adapter).strip() != "（なし）":
@@ -227,13 +264,35 @@ def _build_runtime_key(checkpoint, model_device, model_precision, codec_device, 
         lora_path=lora_path,
     )
 
-def _load_model(checkpoint, model_device, model_precision, codec_device, codec_precision, enable_watermark, lora_adapter="（なし）") -> tuple[str, str, bool]:
+
+def _load_model(
+    checkpoint,
+    model_device,
+    model_precision,
+    codec_device,
+    codec_precision,
+    enable_watermark,
+    lora_adapter="（なし）",
+) -> tuple[str, str, bool]:
     """モデルをロードしてステータスと自動選択された codec_repo を返す。"""
     # ロード前にlatent_dimを先読みして正しいcodec_repoを決定する
     _raw_cp = _resolve_checkpoint_path_infer(str(checkpoint).strip())
     _ldim_pre = _peek_latent_dim_from_checkpoint(_raw_cp)
-    _initial_codec_repo = _codec_repo_for_latent_dim(_ldim_pre) if _ldim_pre is not None else "Aratako/Semantic-DACVAE-Japanese-32dim"
-    runtime_key = _build_runtime_key(checkpoint, model_device, model_precision, codec_device, codec_precision, enable_watermark, lora_adapter, codec_repo=_initial_codec_repo)
+    _initial_codec_repo = (
+        _codec_repo_for_latent_dim(_ldim_pre)
+        if _ldim_pre is not None
+        else "Aratako/Semantic-DACVAE-Japanese-32dim"
+    )
+    runtime_key = _build_runtime_key(
+        checkpoint,
+        model_device,
+        model_precision,
+        codec_device,
+        codec_precision,
+        enable_watermark,
+        lora_adapter,
+        codec_repo=_initial_codec_repo,
+    )
     _, reloaded = get_cached_runtime(runtime_key)
     status = "モデルを読み込みました" if reloaded else "モデルは既にロード済みです（再利用）"
 
@@ -248,7 +307,11 @@ def _load_model(checkpoint, model_device, model_precision, codec_device, codec_p
 
     lora_info = f"\nLoRAアダプタ: {runtime_key.lora_path}" if runtime_key.lora_path else ""
     voice_design_enabled = _runtime_uses_voice_design()
-    vd_line = "\nvoice_design: enabled (caption conditioning)" if voice_design_enabled else "\nvoice_design: disabled"
+    vd_line = (
+        "\nvoice_design: enabled (caption conditioning)"
+        if voice_design_enabled
+        else "\nvoice_design: disabled"
+    )
     status_text = (
         f"{status}\n"
         f"checkpoint: {runtime_key.checkpoint}"
@@ -261,26 +324,47 @@ def _load_model(checkpoint, model_device, model_precision, codec_device, codec_p
     )
     return status_text, auto_codec_repo, voice_design_enabled
 
+
 def _clear_runtime_cache() -> str:
     clear_cached_runtime()
     return "モデルをメモリから解放しました"
 
 
 def _clear_runtime_cache_ui():
-    return (
-        _clear_runtime_cache(),
-    )
+    return (_clear_runtime_cache(),)
+
 
 def _run_generation(
-    checkpoint, model_device, model_precision, codec_device, codec_precision, enable_watermark,
-    lora_adapter, lora_scale, lora_disabled_modules_raw,
-    text, caption_text, uploaded_audio, spk_ref_latent_path,
-    num_steps, seed_raw, cfg_guidance_mode, cfg_scale_text, cfg_scale_speaker,
+    checkpoint,
+    model_device,
+    model_precision,
+    codec_device,
+    codec_precision,
+    enable_watermark,
+    lora_adapter,
+    lora_scale,
+    lora_disabled_modules_raw,
+    text,
+    caption_text,
+    uploaded_audio,
+    spk_ref_latent_path,
+    num_steps,
+    seed_raw,
+    cfg_guidance_mode,
+    cfg_scale_text,
+    cfg_scale_speaker,
     cfg_scale_caption,
-    cfg_scale_raw, cfg_min_t, cfg_max_t, context_kv_cache,
+    cfg_scale_raw,
+    cfg_min_t,
+    cfg_max_t,
+    context_kv_cache,
     max_caption_len_raw,
-    truncation_factor_raw, rescale_k_raw, rescale_sigma_raw,
-    speaker_kv_scale_raw, speaker_kv_min_t_raw, speaker_kv_max_layers_raw,
+    truncation_factor_raw,
+    rescale_k_raw,
+    rescale_sigma_raw,
+    speaker_kv_scale_raw,
+    speaker_kv_min_t_raw,
+    speaker_kv_max_layers_raw,
     num_candidates: int = 1,
     filename_prefix: str = "",
 ) -> tuple[list[tuple[str, str]], str, str]:
@@ -290,25 +374,29 @@ def _run_generation(
     # ロード済みモデルの codec_repo を優先使用（v1/v2 自動対応）
     info = _detect_model_version_from_runtime()
     auto_codec_repo = (
-        info[1] if info is not None
-        else _codec_repo_for_latent_dim(32)  # フォールバック: v2
+        info[1] if info is not None else _codec_repo_for_latent_dim(32)  # フォールバック: v2
     )
     runtime_key = _build_runtime_key(
-        checkpoint, model_device, model_precision,
-        codec_device, codec_precision, enable_watermark,
-        lora_adapter, codec_repo=auto_codec_repo,
+        checkpoint,
+        model_device,
+        model_precision,
+        codec_device,
+        codec_precision,
+        enable_watermark,
+        lora_adapter,
+        codec_repo=auto_codec_repo,
     )
     if str(text).strip() == "":
         raise ValueError("テキストを入力してください。")
-    
+
     if not filename_prefix:
         filename_prefix = Path(checkpoint).name.split("_")[0]
 
-    cfg_scale        = _parse_optional_float(cfg_scale_raw, "cfg_scale")
-    max_caption_len  = _parse_optional_int(max_caption_len_raw, "max_caption_len")
-    truncation_factor= _parse_optional_float(truncation_factor_raw, "truncation_factor")
-    rescale_k        = _parse_optional_float(rescale_k_raw, "rescale_k")
-    rescale_sigma    = _parse_optional_float(rescale_sigma_raw, "rescale_sigma")
+    cfg_scale = _parse_optional_float(cfg_scale_raw, "cfg_scale")
+    max_caption_len = _parse_optional_int(max_caption_len_raw, "max_caption_len")
+    truncation_factor = _parse_optional_float(truncation_factor_raw, "truncation_factor")
+    rescale_k = _parse_optional_float(rescale_k_raw, "rescale_k")
+    rescale_sigma = _parse_optional_float(rescale_sigma_raw, "rescale_sigma")
     speaker_kv_scale = _parse_optional_float(speaker_kv_scale_raw, "speaker_kv_scale")
     speaker_kv_min_t = _parse_optional_float(speaker_kv_min_t_raw, "speaker_kv_min_t")
     speaker_kv_max_layers = _parse_optional_int(speaker_kv_max_layers_raw, "speaker_kv_max_layers")
@@ -317,8 +405,7 @@ def _run_generation(
     # lora_disabled_modules: カンマ区切り文字列 → tuple[str, ...]
     _disabled_raw = str(lora_disabled_modules_raw).strip() if lora_disabled_modules_raw else ""
     lora_disabled_modules: tuple[str, ...] = (
-        tuple(m.strip() for m in _disabled_raw.split(",") if m.strip())
-        if _disabled_raw else ()
+        tuple(m.strip() for m in _disabled_raw.split(",") if m.strip()) if _disabled_raw else ()
     )
 
     # 参照音声の優先順位: スピーカーライブラリ > 直接アップロード > no-reference
@@ -340,14 +427,16 @@ def _run_generation(
     runtime, reloaded = get_cached_runtime(runtime_key)
     stdout_log(f"[gradio] runtime: {'reloaded' if reloaded else 'reused'}")
     use_voice_design = bool(getattr(runtime.model_cfg, "use_caption_condition", False))
-    caption_value = str(caption_text).strip() if use_voice_design and caption_text is not None else ""
+    caption_value = (
+        str(caption_text).strip() if use_voice_design and caption_text is not None else ""
+    )
 
     # モデルバージョン情報をログに記録
     _ver_info = _detect_model_version_from_runtime()
     _ver_str = f"{_ver_info[0]} (latent_dim={_ver_info[2]})" if _ver_info else "unknown"
     stdout_log(f"[gradio] model_version: {_ver_str}")
 
-    cnf.OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
+    cnfg.outputs_dir.mkdir(parents=True, exist_ok=True)
 
     gallery_items: list[tuple[str, str]] = []
     all_detail_lines: list[str] = [
@@ -362,8 +451,13 @@ def _run_generation(
     def _synthesize_line(line_text: str, line_seed) -> object:
         return runtime.synthesize(
             SamplingRequest(
-                text=str(line_text), ref_wav=ref_wav, ref_latent=ref_latent_path, no_ref=bool(no_ref),
-                seconds=cnf.FIXED_SECONDS, max_ref_seconds=30.0, max_text_len=None,
+                text=str(line_text),
+                ref_wav=ref_wav,
+                ref_latent=ref_latent_path,
+                no_ref=bool(no_ref),
+                seconds=cnfg.fixed_seconds,
+                max_ref_seconds=30.0,
+                max_text_len=None,
                 caption=caption_value or None,
                 max_caption_len=max_caption_len,
                 num_steps=int(num_steps),
@@ -372,11 +466,17 @@ def _run_generation(
                 cfg_scale_text=float(cfg_scale_text),
                 cfg_scale_caption=float(cfg_scale_caption),
                 cfg_scale_speaker=float(cfg_scale_speaker),
-                cfg_scale=cfg_scale, cfg_min_t=float(cfg_min_t), cfg_max_t=float(cfg_max_t),
-                truncation_factor=truncation_factor, rescale_k=rescale_k, rescale_sigma=rescale_sigma,
+                cfg_scale=cfg_scale,
+                cfg_min_t=float(cfg_min_t),
+                cfg_max_t=float(cfg_max_t),
+                truncation_factor=truncation_factor,
+                rescale_k=rescale_k,
+                rescale_sigma=rescale_sigma,
                 context_kv_cache=bool(context_kv_cache),
-                speaker_kv_scale=speaker_kv_scale, speaker_kv_min_t=speaker_kv_min_t,
-                speaker_kv_max_layers=speaker_kv_max_layers, trim_tail=True,
+                speaker_kv_scale=speaker_kv_scale,
+                speaker_kv_min_t=speaker_kv_min_t,
+                speaker_kv_max_layers=speaker_kv_max_layers,
+                trim_tail=True,
                 lora_scale=float(lora_scale) if runtime_key.lora_path else 1.0,
                 lora_disabled_modules=lora_disabled_modules if runtime_key.lora_path else (),
             ),
@@ -389,22 +489,22 @@ def _run_generation(
 
         result = _synthesize_line(str(text), candidate_seed)
 
-        stamp    = datetime.now().strftime("%Y%m%d_%H%M%S")
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         out_path = save_wav(
-            cnf.OUTPUTS_DIR / f"{filename_prefix}_{stamp}_c{i + 1}.wav",
-            result.audio.float(), # type: ignore
-            result.sample_rate, # type: ignore
+            cnfg.outputs_dir / f"{filename_prefix}_{stamp}_c{i + 1}.wav",
+            result.audio.float(),  # type: ignore
+            result.sample_rate,  # type: ignore
         )
-        caption = f"候補 {i + 1}  seed={result.used_seed}" # type: ignore
+        caption = f"候補 {i + 1}  seed={result.used_seed}"  # type: ignore
         gallery_items.append((str(out_path), caption))
 
         all_detail_lines.append(
-            f"[候補 {i + 1}] seed={result.used_seed}  saved={out_path}" # type: ignore
+            f"[候補 {i + 1}] seed={result.used_seed}  saved={out_path}"  # type: ignore
         )
-        for msg in result.messages: # type: ignore
+        for msg in result.messages:  # type: ignore
             all_detail_lines.append(f"  {msg}")
 
-        last_timing_text = _format_timings(result.stage_timings, result.total_to_decode) # type: ignore
+        last_timing_text = _format_timings(result.stage_timings, result.total_to_decode)  # type: ignore
         stdout_log(f"[gradio] candidate {i + 1} saved: {out_path}")
 
     detail_text = "\n".join(all_detail_lines)
@@ -422,6 +522,7 @@ def _detect_model_version_from_runtime() -> tuple[str, str, int] | None:
     """キャッシュ済み runtime からモデルバージョン情報を取得する。
     戻り値: (version_label, codec_repo, latent_dim) または None"""
     from irodori_tts.inference_runtime import _RUNTIME_CACHE_VALUE
+
     runtime = _RUNTIME_CACHE_VALUE
     if runtime is None:
         return None
@@ -436,6 +537,7 @@ def _validate_lora_compat_ui(lora_adapter: str) -> str:
     戻り値: 状態メッセージ文字列（エラー時は ❌ プレフィックス）
     """
     import json as _json
+
     if not lora_adapter or lora_adapter.strip() in ("", "（なし）"):
         return ""
 
@@ -475,14 +577,13 @@ def _validate_lora_compat_ui(lora_adapter: str) -> str:
         try:
             from safetensors import safe_open as _safe_open
             from irodori_tts.inference_runtime import _RUNTIME_CACHE_VALUE
+
             runtime = _RUNTIME_CACHE_VALUE
-            expected_patched = ldim * int(runtime.model_cfg.latent_patch_size) # type: ignore
+            expected_patched = ldim * int(runtime.model_cfg.latent_patch_size)  # type: ignore
 
             with _safe_open(str(adapter_st_path), framework="pt", device="cpu") as _h:
                 all_keys = list(_h.keys())
-            in_proj_key = next(
-                (k for k in all_keys if "in_proj" in k and "lora_A" in k), None
-            )
+            in_proj_key = next((k for k in all_keys if "in_proj" in k and "lora_A" in k), None)
             if in_proj_key is not None:
                 with _safe_open(str(adapter_st_path), framework="pt", device="cpu") as _h:
                     t = _h.get_tensor(in_proj_key)
@@ -509,10 +610,10 @@ def _runtime_uses_voice_design() -> bool:
     return bool(getattr(runtime.model_cfg, "use_caption_condition", False))
 
 
-
 # ─────────────────────────────
 # UI 生成
 # ─────────────────────────────
+
 
 def build(ctx):
     with gr.Tab("🔊 推論"):
@@ -523,7 +624,8 @@ def build(ctx):
                 label="チェックポイント (.pt / .safetensors)",
                 choices=ctx.initial_checkpoints,
                 value=ctx.default_checkpoint or None,
-                scale=4, allow_custom_value=False,
+                scale=4,
+                allow_custom_value=False,
             )
             infer_refresh_btn = gr.Button("更新", scale=1)
 
@@ -532,7 +634,8 @@ def build(ctx):
                 label="LoRAアダプタ（なし=ベースモデルのみ）",
                 choices=["（なし）"] + scan_lora_adapters(),
                 value="（なし）",
-                scale=4, allow_custom_value=False,
+                scale=4,
+                allow_custom_value=False,
             )
             infer_lora_refresh_btn = gr.Button("更新", scale=1)
         infer_lora_compat_status = gr.Textbox(
@@ -544,7 +647,11 @@ def build(ctx):
         )
         infer_lora_scale = gr.Slider(
             label="LoRAスケール（0.0=LoRA無効 / 1.0=通常 / >1.0=強調）",
-            minimum=0.0, maximum=2.0, value=1.0, step=0.05, visible=False,
+            minimum=0.0,
+            maximum=2.0,
+            value=1.0,
+            step=0.05,
+            visible=False,
         )
         infer_lora_disabled_modules = gr.Textbox(
             label="LoRA無効モジュール（カンマ区切り、空=全て有効）",
@@ -555,23 +662,43 @@ def build(ctx):
         )
         with gr.Accordion("モデル詳細設定", open=False):
             with gr.Row():
-                model_device = gr.Dropdown(label="モデルデバイス", choices=ctx.device_choices, value=ctx.default_model_device, scale=1)
-                model_precision = gr.Dropdown(label="モデル精度", choices=ctx.model_precision_choices, value=ctx.model_precision_choices[0], scale=1)
-                codec_device = gr.Dropdown(label="コーデックデバイス", choices=ctx.device_choices, value=ctx.default_codec_device, scale=1)
-                codec_precision = gr.Dropdown(label="コーデック精度", choices=ctx.codec_precision_choices, value=ctx.codec_precision_choices[0], scale=1)
+                model_device = gr.Dropdown(
+                    label="モデルデバイス",
+                    choices=ctx.device_choices,
+                    value=ctx.default_model_device,
+                    scale=1,
+                )
+                model_precision = gr.Dropdown(
+                    label="モデル精度",
+                    choices=ctx.model_precision_choices,
+                    value=ctx.model_precision_choices[0],
+                    scale=1,
+                )
+                codec_device = gr.Dropdown(
+                    label="コーデックデバイス",
+                    choices=ctx.device_choices,
+                    value=ctx.default_codec_device,
+                    scale=1,
+                )
+                codec_precision = gr.Dropdown(
+                    label="コーデック精度",
+                    choices=ctx.codec_precision_choices,
+                    value=ctx.codec_precision_choices[0],
+                    scale=1,
+                )
                 enable_watermark = gr.Checkbox(label="ウォーターマーク", value=False, scale=1)
 
             infer_codec_repo = gr.Dropdown(
                 label="コーデックリポジトリ（モデル読み込み時に自動設定）",
-                choices=cnf.PREPARE_CODEC_REPO_CHOICES,
+                choices=cnfg.prepare_codec_repo_choices,
                 value="Aratako/Semantic-DACVAE-Japanese-32dim",
                 info="v2(dim32) / v1(dim128) — モデル読み込み後に自動切替されます。",
                 interactive=True,
             )
             with gr.Row():
-                load_model_btn  = gr.Button("モデル読み込み", variant="secondary")
-                unload_model_btn= gr.Button("モデル解放",    variant="secondary")
-            
+                load_model_btn = gr.Button("モデル読み込み", variant="secondary")
+                unload_model_btn = gr.Button("モデル解放", variant="secondary")
+
             model_status = gr.Textbox(label="モデルステータス", interactive=False, lines=4)
 
         gr.Markdown("## 音声生成")
@@ -597,15 +724,13 @@ def build(ctx):
                             scale=4,
                         )
                         spk_lib_refresh = gr.Button("更新", scale=1)
-                    spk_info = gr.Textbox(
-                        label="登録情報", interactive=False, lines=2
-                    )
+                    spk_info = gr.Textbox(label="登録情報", interactive=False, lines=2)
 
                     def _on_spk_select(name):
                         if not name or name == "（使用しない）":
                             return "", ""
-                        pt = cnf.SPEAKERS_DIR / name / "ref.pt"
-                        profile_p = cnf.SPEAKERS_DIR / name / "profile.json"
+                        pt = cnfg.speakers_dir / name / "ref.pt"
+                        profile_p = cnfg.speakers_dir / name / "profile.json"
                         pt_str = str(pt) if pt.exists() else ""
                         info = ""
                         if profile_p.exists():
@@ -643,20 +768,19 @@ def build(ctx):
                         label="参照WAV（5〜30秒推奨、雑音なし）",
                         type="filepath",
                     )
-                    spk_reg_btn = gr.Button(
-                        "登録", variant="primary"
-                    )
-                    spk_reg_status = gr.Textbox(
-                        label="結果", interactive=False, lines=4
-                    )
+                    spk_reg_btn = gr.Button("登録", variant="primary")
+                    spk_reg_status = gr.Textbox(label="結果", interactive=False, lines=4)
 
                     spk_reg_btn.click(
                         _run_create_speaker,
                         inputs=[
-                            spk_reg_name, spk_reg_wav,
+                            spk_reg_name,
+                            spk_reg_wav,
                             infer_checkpoint,
-                            model_device, model_precision,
-                            codec_device, codec_precision,
+                            model_device,
+                            model_precision,
+                            codec_device,
+                            codec_precision,
                         ],
                         outputs=[spk_reg_status],
                     )
@@ -675,7 +799,10 @@ def build(ctx):
                     with gr.Row():
                         cfg_scale_caption = gr.Slider(
                             label="Caption CFG Scale",
-                            minimum=0.0, maximum=10.0, value=3.0, step=0.1,
+                            minimum=0.0,
+                            maximum=10.0,
+                            value=3.0,
+                            step=0.1,
                         )
                         max_caption_len_raw = gr.Textbox(
                             label="Max Caption Len (optional)",
@@ -688,37 +815,56 @@ def build(ctx):
                 "その後スライダーを手動調整することも可能です。"
             )
             with gr.Row():
-                preset_normal  = gr.Button("ノーマル",   variant="secondary", scale=1)
-                preset_strong  = gr.Button("力強く",     variant="secondary", scale=1)
-                preset_calm    = gr.Button("おとなしく", variant="secondary", scale=1)
-                preset_bright  = gr.Button("明るく",     variant="secondary", scale=1)
+                preset_normal = gr.Button("ノーマル", variant="secondary", scale=1)
+                preset_strong = gr.Button("力強く", variant="secondary", scale=1)
+                preset_calm = gr.Button("おとなしく", variant="secondary", scale=1)
+                preset_bright = gr.Button("明るく", variant="secondary", scale=1)
                 preset_whisper = gr.Button("ひそやかに", variant="secondary", scale=1)
 
             gr.Markdown("##### スタイル調整パラメータ")
             with gr.Row():
                 style_cfg_text = gr.Slider(
                     label="テキスト表現力（低：棒読み ↔ 高：抑揚強調）",
-                    minimum=0.0, maximum=10.0, value=3.0, step=0.1, scale=2,
+                    minimum=0.0,
+                    maximum=10.0,
+                    value=3.0,
+                    step=0.1,
+                    scale=2,
                 )
                 style_cfg_speaker = gr.Slider(
                     label="感情の強さ（低：ニュートラル ↔ 高：スタイル強調）",
-                    minimum=0.0, maximum=10.0, value=5.0, step=0.1, scale=2,
+                    minimum=0.0,
+                    maximum=10.0,
+                    value=5.0,
+                    step=0.1,
+                    scale=2,
                 )
             with gr.Row():
                 style_kv_scale = gr.Slider(
                     label="話者密着度（1.0=標準、高いほど参照音声の特徴を強く反映）",
-                    minimum=1.0, maximum=4.0, value=1.0, step=0.1, scale=2,
+                    minimum=1.0,
+                    maximum=4.0,
+                    value=1.0,
+                    step=0.1,
+                    scale=2,
                 )
                 style_trunc = gr.Slider(
                     label="表現の振れ幅（低：安定・平坦 ↔ 高：ダイナミック・不安定）",
-                    minimum=0.7, maximum=1.0, value=1.0, step=0.01, scale=2,
+                    minimum=0.7,
+                    maximum=1.0,
+                    value=1.0,
+                    step=0.01,
+                    scale=2,
                 )
 
         with gr.Accordion("サンプリング設定", open=True):
             with gr.Row():
                 num_steps = gr.Slider(
                     label="ステップ数（多いほど品質向上・低速）",
-                    minimum=1, maximum=120, value=40, step=1,
+                    minimum=1,
+                    maximum=120,
+                    value=40,
+                    step=1,
                 )
                 seed_raw = gr.Textbox(label="シード（空白=ランダム）", value="")
 
@@ -737,18 +883,22 @@ def build(ctx):
                 )
                 cfg_scale_text = gr.Slider(
                     label="テキストCFG強度",
-                    minimum=0.0, maximum=10.0, value=3.0, step=0.1,
+                    minimum=0.0,
+                    maximum=10.0,
+                    value=3.0,
+                    step=0.1,
                     info="テキスト内容への忠実度。感情スタイルと連動します。",
                 )
                 cfg_scale_speaker = gr.Slider(
                     label="話者CFG強度",
-                    minimum=0.0, maximum=10.0, value=5.0, step=0.1,
+                    minimum=0.0,
+                    maximum=10.0,
+                    value=5.0,
+                    step=0.1,
                     info="参照音声の声質への忠実度。感情スタイルと連動します。",
                 )
         with gr.Accordion("詳細設定（上級者向け）", open=False):
-            gr.Markdown(
-                "通常は変更不要です。動作確認・実験用途向けの項目です。"
-            )
+            gr.Markdown("通常は変更不要です。動作確認・実験用途向けの項目です。")
             cfg_scale_raw = gr.Textbox(
                 label="CFGスケール一括上書き（テキスト・話者を同値に設定。空=無効）",
                 value="",
@@ -793,31 +943,32 @@ def build(ctx):
                 )
 
             truncation_factor_raw = gr.Textbox(visible=False, value="")
-            speaker_kv_scale_raw  = gr.Textbox(visible=False, value="")
+            speaker_kv_scale_raw = gr.Textbox(visible=False, value="")
 
         with gr.Row():
             num_candidates = gr.Slider(
                 label="生成候補数 (Num Candidates)",
-                minimum=1, maximum=8, value=1, step=1,
+                minimum=1,
+                maximum=8,
+                value=1,
+                step=1,
                 scale=4,
                 info="1回の生成で作成する数。シード指定時は seed, seed+1, seed+2...。改行分割モード時は1固定。",
             )
             filename_prefix = gr.Textbox(
                 label="File name prefix",
-                value=ctx.args.output_prefix,
+                value=cnfg.output_prefix,
                 scale=4,
                 info="If left blank, use the model name.",
             )
 
         infer_text = gr.Textbox(label="テキスト（合成したい文章）", lines=4)
-        
+
         generate_btn = gr.Button("生成", variant="primary", size="lg")
 
         _MAX_CANDIDATES = 8
         gr.Markdown("### 生成結果")
-        gr.Markdown(
-            "ファイルは `" + str(cnf.OUTPUTS_DIR) + "` フォルダに保存されています。"
-        )
+        gr.Markdown("ファイルは `" + str(cnfg.outputs_dir) + "` フォルダに保存されています。")
 
         _cand_labels = []
         _cand_audios = []
@@ -844,7 +995,7 @@ def build(ctx):
             _cand_labels.append(_lbl)
             _cand_audios.append(_aud)
 
-        out_log    = gr.Textbox(label="実行ログ", lines=6)
+        out_log = gr.Textbox(label="実行ログ", lines=6)
         out_timing = gr.Textbox(label="タイミング情報", lines=6)
 
         def _run_generation_ui(*args):
@@ -862,10 +1013,10 @@ def build(ctx):
             return label_updates + audio_updates + [detail_text, timing_text]
 
         _PRESETS = {
-            "normal":  (3.0, 5.0, 1.0, 1.0),
-            "strong":  (5.0, 7.0, 1.8, 1.0),
-            "calm":    (2.0, 3.0, 1.0, 0.80),
-            "bright":  (4.5, 6.0, 1.5, 0.95),
+            "normal": (3.0, 5.0, 1.0, 1.0),
+            "strong": (5.0, 7.0, 1.8, 1.0),
+            "calm": (2.0, 3.0, 1.0, 0.80),
+            "bright": (4.5, 6.0, 1.5, 0.95),
             "whisper": (2.0, 2.0, 1.0, 0.75),
         }
 
@@ -876,26 +1027,35 @@ def build(ctx):
             return ct, cs, ct, cs, kv, tr, kv_str, tr_str
 
         _preset_outputs = [
-            style_cfg_text, style_cfg_speaker,
-            cfg_scale_text, cfg_scale_speaker,
-            style_kv_scale, style_trunc,
-            speaker_kv_scale_raw, truncation_factor_raw,
+            style_cfg_text,
+            style_cfg_speaker,
+            cfg_scale_text,
+            cfg_scale_speaker,
+            style_kv_scale,
+            style_trunc,
+            speaker_kv_scale_raw,
+            truncation_factor_raw,
         ]
 
         preset_normal.click(
-            lambda: _apply_preset("normal"), outputs=_preset_outputs,
+            lambda: _apply_preset("normal"),
+            outputs=_preset_outputs,
         )
         preset_strong.click(
-            lambda: _apply_preset("strong"), outputs=_preset_outputs,
+            lambda: _apply_preset("strong"),
+            outputs=_preset_outputs,
         )
         preset_calm.click(
-            lambda: _apply_preset("calm"), outputs=_preset_outputs,
+            lambda: _apply_preset("calm"),
+            outputs=_preset_outputs,
         )
         preset_bright.click(
-            lambda: _apply_preset("bright"), outputs=_preset_outputs,
+            lambda: _apply_preset("bright"),
+            outputs=_preset_outputs,
         )
         preset_whisper.click(
-            lambda: _apply_preset("whisper"), outputs=_preset_outputs,
+            lambda: _apply_preset("whisper"),
+            outputs=_preset_outputs,
         )
 
         def _sync_style_to_cfg(ct, cs, kv, tr):
@@ -906,33 +1066,59 @@ def build(ctx):
         style_cfg_text.change(
             lambda v, cs, kv, tr: _sync_style_to_cfg(v, cs, kv, tr),
             inputs=[style_cfg_text, style_cfg_speaker, style_kv_scale, style_trunc],
-            outputs=[cfg_scale_text, cfg_scale_speaker, speaker_kv_scale_raw, truncation_factor_raw],
+            outputs=[
+                cfg_scale_text,
+                cfg_scale_speaker,
+                speaker_kv_scale_raw,
+                truncation_factor_raw,
+            ],
         )
         style_cfg_speaker.change(
             lambda ct, v, kv, tr: _sync_style_to_cfg(ct, v, kv, tr),
             inputs=[style_cfg_text, style_cfg_speaker, style_kv_scale, style_trunc],
-            outputs=[cfg_scale_text, cfg_scale_speaker, speaker_kv_scale_raw, truncation_factor_raw],
+            outputs=[
+                cfg_scale_text,
+                cfg_scale_speaker,
+                speaker_kv_scale_raw,
+                truncation_factor_raw,
+            ],
         )
         style_kv_scale.change(
             lambda ct, cs, v, tr: _sync_style_to_cfg(ct, cs, v, tr),
             inputs=[style_cfg_text, style_cfg_speaker, style_kv_scale, style_trunc],
-            outputs=[cfg_scale_text, cfg_scale_speaker, speaker_kv_scale_raw, truncation_factor_raw],
+            outputs=[
+                cfg_scale_text,
+                cfg_scale_speaker,
+                speaker_kv_scale_raw,
+                truncation_factor_raw,
+            ],
         )
         style_trunc.change(
             lambda ct, cs, kv, v: _sync_style_to_cfg(ct, cs, kv, v),
             inputs=[style_cfg_text, style_cfg_speaker, style_kv_scale, style_trunc],
-            outputs=[cfg_scale_text, cfg_scale_speaker, speaker_kv_scale_raw, truncation_factor_raw],
+            outputs=[
+                cfg_scale_text,
+                cfg_scale_speaker,
+                speaker_kv_scale_raw,
+                truncation_factor_raw,
+            ],
         )
 
         cfg_scale_text.change(
-            lambda v: v, inputs=[cfg_scale_text], outputs=[style_cfg_text],
+            lambda v: v,
+            inputs=[cfg_scale_text],
+            outputs=[style_cfg_text],
         )
         cfg_scale_speaker.change(
-            lambda v: v, inputs=[cfg_scale_speaker], outputs=[style_cfg_speaker],
+            lambda v: v,
+            inputs=[cfg_scale_speaker],
+            outputs=[style_cfg_speaker],
         )
 
         infer_refresh_btn.click(
-            lambda: gr.Dropdown(choices=scan_checkpoints(), value=(scan_checkpoints() or [None])[-1]),
+            lambda: gr.Dropdown(
+                choices=scan_checkpoints(), value=(scan_checkpoints() or [None])[-1]
+            ),
             outputs=[infer_checkpoint],
         )
         infer_lora_refresh_btn.click(
@@ -955,17 +1141,37 @@ def build(ctx):
             outputs=[infer_lora_scale, infer_lora_disabled_modules, infer_lora_compat_status],
         )
 
-        model_device.change(_on_model_device_change, inputs=[model_device], outputs=[model_precision])
-        codec_device.change(_on_codec_device_change, inputs=[codec_device], outputs=[codec_precision])
+        model_device.change(
+            _on_model_device_change, inputs=[model_device], outputs=[model_precision]
+        )
+        codec_device.change(
+            _on_codec_device_change, inputs=[codec_device], outputs=[codec_precision]
+        )
 
-        def _load_model_ui(checkpoint, model_device, model_precision, codec_device, codec_precision, enable_watermark, lora_adapter, cur_lora_adapter):
+        def _load_model_ui(
+            checkpoint,
+            model_device,
+            model_precision,
+            codec_device,
+            codec_precision,
+            enable_watermark,
+            lora_adapter,
+            cur_lora_adapter,
+        ):
             status_text, auto_codec, voice_design_enabled = _load_model(
-                checkpoint, model_device, model_precision,
-                codec_device, codec_precision, enable_watermark, lora_adapter,
+                checkpoint,
+                model_device,
+                model_precision,
+                codec_device,
+                codec_precision,
+                enable_watermark,
+                lora_adapter,
             )
-            compat_msg = _validate_lora_compat_ui(cur_lora_adapter) if (
-                str(cur_lora_adapter).strip() not in ("", "（なし）")
-            ) else ""
+            compat_msg = (
+                _validate_lora_compat_ui(cur_lora_adapter)
+                if (str(cur_lora_adapter).strip() not in ("", "（なし）"))
+                else ""
+            )
             return (
                 status_text,
                 gr.Dropdown(value=auto_codec),
@@ -974,22 +1180,53 @@ def build(ctx):
 
         load_model_btn.click(
             _load_model_ui,
-            inputs=[infer_checkpoint, model_device, model_precision,
-                    codec_device, codec_precision, enable_watermark,
-                    infer_lora_adapter, infer_lora_adapter],
+            inputs=[
+                infer_checkpoint,
+                model_device,
+                model_precision,
+                codec_device,
+                codec_precision,
+                enable_watermark,
+                infer_lora_adapter,
+                infer_lora_adapter,
+            ],
             outputs=[model_status, infer_codec_repo, infer_lora_compat_status],
         )
         unload_model_btn.click(_clear_runtime_cache_ui, outputs=[model_status])
         _ui_outputs = _cand_labels + _cand_audios + [out_log, out_timing]
-        generate_btn.click(_run_generation_ui,
+        generate_btn.click(
+            _run_generation_ui,
             inputs=[
-                infer_checkpoint, model_device, model_precision, codec_device, codec_precision, enable_watermark,
-                infer_lora_adapter, infer_lora_scale, infer_lora_disabled_modules,
-                infer_text, caption_input_vd, infer_audio, spk_ref_latent_path,
-                num_steps, seed_raw, cfg_guidance_mode,
-                cfg_scale_text, cfg_scale_speaker, cfg_scale_caption, cfg_scale_raw, cfg_min_t, cfg_max_t,
-                context_kv_cache, max_caption_len_raw, truncation_factor_raw, rescale_k_raw, rescale_sigma_raw,
-                speaker_kv_scale_raw, speaker_kv_min_t_raw, speaker_kv_max_layers_raw,
+                infer_checkpoint,
+                model_device,
+                model_precision,
+                codec_device,
+                codec_precision,
+                enable_watermark,
+                infer_lora_adapter,
+                infer_lora_scale,
+                infer_lora_disabled_modules,
+                infer_text,
+                caption_input_vd,
+                infer_audio,
+                spk_ref_latent_path,
+                num_steps,
+                seed_raw,
+                cfg_guidance_mode,
+                cfg_scale_text,
+                cfg_scale_speaker,
+                cfg_scale_caption,
+                cfg_scale_raw,
+                cfg_min_t,
+                cfg_max_t,
+                context_kv_cache,
+                max_caption_len_raw,
+                truncation_factor_raw,
+                rescale_k_raw,
+                rescale_sigma_raw,
+                speaker_kv_scale_raw,
+                speaker_kv_min_t_raw,
+                speaker_kv_max_layers_raw,
                 num_candidates,
                 filename_prefix,
             ],
