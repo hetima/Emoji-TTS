@@ -5,8 +5,8 @@ from pathlib import Path
 # ─────────────────────────────────────────────────────────────────────────────
 # 定数
 # ─────────────────────────────────────────────────────────────────────────────
-REPO_DIR = Path(__file__).resolve().parent
-BASE_DIR = Path(__file__).resolve().parent
+REPO_DIR = Path(__file__).resolve().parent.parent
+BASE_DIR = Path(__file__).resolve().parent.parent
 CHECKPOINTS_DIR = BASE_DIR / "checkpoints"
 CONFIGS_DIR = BASE_DIR / "configs"
 LOGS_DIR = BASE_DIR / "logs"
