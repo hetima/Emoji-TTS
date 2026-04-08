@@ -390,7 +390,12 @@ def _run_generation(
         raise ValueError("テキストを入力してください。")
 
     if not filename_prefix:
-        filename_prefix = Path(checkpoint).name.split("_")[0]
+        if lora_adapter and lora_adapter != "（なし）":
+            filename_prefix = Path(lora_adapter).name.split("_")[0].split(".")[0]
+            if filename_prefix == "checkpoint":
+                filename_prefix = Path(lora_adapter).parent.name.split("_")[0]
+        else:
+            filename_prefix = Path(checkpoint).name.split("_")[0].split(".")[0]
 
     cfg_scale = _parse_optional_float(cfg_scale_raw, "cfg_scale")
     max_caption_len = _parse_optional_int(max_caption_len_raw, "max_caption_len")
@@ -490,8 +495,9 @@ def _run_generation(
         result = _synthesize_line(str(text), candidate_seed)
 
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        file_path = make_unique_file_path(cnfg.outputs_dir / f"{filename_prefix}_{stamp}.wav")
         out_path = save_wav(
-            cnfg.outputs_dir / f"{filename_prefix}_{stamp}_c{i + 1}.wav",
+            file_path,
             result.audio.float(),  # type: ignore
             result.sample_rate,  # type: ignore
         )

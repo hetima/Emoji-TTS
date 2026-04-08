@@ -151,3 +151,16 @@ def ensure_default_model() -> None:
 
 def merge_scan() -> list[str]:
     return scan_checkpoints_for_merge()
+
+def make_unique_file_path(path: Path) -> Path:
+    if not path.exists():
+        return path
+    for i in range(2, 99):
+        new_path = path.parent / f"{path.stem}_{i:02}{path.suffix}"
+        if not new_path.exists():
+            return new_path
+    for i in range(100, 999):
+        new_path = path.parent / f"{path.stem}_{i:03}{path.suffix}"
+        if not new_path.exists():
+            return new_path
+    return path
