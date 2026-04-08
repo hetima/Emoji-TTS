@@ -89,7 +89,7 @@ def scan_configs() -> list[str]:
 
 
 def scan_manifests() -> list[str]:
-    return sorted(str(p) for p in cnfg.base_dir.glob("**/*.jsonl"))
+    return sorted(str(p) for p in cnfg.data_root_dir.glob("**/*.jsonl"))
 
 
 def scan_train_checkpoints() -> list[str]:

@@ -54,3 +54,4 @@ checkpoints/whisper/
 torch_hub/
 
 app_setting.json
+data/*/*

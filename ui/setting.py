@@ -13,6 +13,7 @@ LOGS_DIR = BASE_DIR / "logs"
 OUTPUTS_DIR = BASE_DIR / "gradio_outputs"
 OUTPU_PREFIX = ""
 LORA_DIR = BASE_DIR / "lora"
+DATA_ROOT_DIR = BASE_DIR / "data"
 DEFAULT_HF_REPO = "Aratako/Irodori-TTS-500M-v2"
 DEFAULT_CONFIG = "train_v2.yaml"
 DEFAULT_PREPARE_CODEC_REPO = "Aratako/Semantic-DACVAE-Japanese-32dim"
@@ -35,6 +36,7 @@ class Setting:
             "speakers_dir",
             "checkpoints_dir",
             "lora_dir",
+            "data_root_dir"
             "default_dataset_dir",
             "fixed_seconds",
         ),
@@ -52,6 +54,7 @@ class Setting:
     configs_dir: Path = CONFIGS_DIR
     logs_dir: Path = LOGS_DIR
     lora_dir: Path = LORA_DIR
+    data_root_dir: Path = DATA_ROOT_DIR
     default_hf_repo: str = DEFAULT_HF_REPO
     default_config: str = DEFAULT_CONFIG
     default_dataset_dir: Path = DEFAULT_DATASET_DIR
@@ -97,3 +100,4 @@ class Setting:
 
 
 cnfg = Setting()
+cnfg.load()

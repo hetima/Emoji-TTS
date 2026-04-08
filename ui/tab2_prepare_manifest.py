@@ -118,8 +118,7 @@ def _build_manifest_command(
     text_col,
     speaker_col,
     caption_col,
-    output_manifest,
-    latent_dir,
+    project_name,
     device,
     codec_repo,
 ) -> list[str]:
@@ -149,6 +148,8 @@ def _build_manifest_command(
     if not auto_codec_repo:
         auto_codec_repo = cnfg.default_prepare_codec_repo
 
+    output_manifest = cnfg.data_root_dir / project_name / "train_manifest.jsonl"
+    latent_dir = cnfg.data_root_dir / project_name / "latents"
     cmd += [
         "--audio-column",
         _s(audio_col, "audio"),
@@ -183,8 +184,7 @@ def _manifest_cmd_preview(
     text_col,
     speaker_col,
     caption_col,
-    output_manifest,
-    latent_dir,
+    project_name,
     device,
     codec_repo,
 ) -> str:
@@ -198,8 +198,7 @@ def _manifest_cmd_preview(
             text_col,
             speaker_col,
             caption_col,
-            output_manifest,
-            latent_dir,
+            project_name,
             device,
             codec_repo,
         )
@@ -215,12 +214,13 @@ def _run_manifest(
     text_col,
     speaker_col,
     caption_col,
-    output_manifest,
-    latent_dir,
+    project_name,
     device,
     codec_repo,
 ) -> tuple[str, str]:
     global _active_proc, _active_log_path
+    if not project_name:
+        return "プロジェクト名を入力してください。", ""
     cmd_list = _build_manifest_command(
         data_source_mode,
         dataset,
@@ -230,8 +230,7 @@ def _run_manifest(
         text_col,
         speaker_col,
         caption_col,
-        output_manifest,
-        latent_dir,
+        project_name,
         device,
         codec_repo,
     )
@@ -365,13 +364,10 @@ def build(ctx):
             pm_col_status = gr.Textbox(label="列名取得状況", interactive=False, lines=1)
 
         with gr.Row():
-            pm_output_manifest = gr.Textbox(
-                label="出力マニフェストパス（.jsonl）",
-                value=str(cnfg.base_dir / "data" / "train_manifest.jsonl"),
-            )
-            pm_latent_dir = gr.Textbox(
-                label="ラテント保存フォルダ",
-                value=str(cnfg.base_dir / "data" / "latents"),
+            pm_project_name = gr.Textbox(
+                label="プロジェクト名",
+                value="",
+                info=str(cnfg.data_root_dir) + " にこの名前のフォルダを作成します。"
             )
             pm_device = gr.Dropdown(
                 label="使用デバイス",
@@ -493,8 +489,7 @@ def build(ctx):
             text_col,
             speaker_col,
             caption_col,
-            output_manifest,
-            latent_dir,
+            project_name,
             device,
             codec_repo,
         ):
@@ -513,8 +508,7 @@ def build(ctx):
                 text_col,
                 speaker_col,
                 caption_col,
-                output_manifest,
-                latent_dir,
+                project_name,
                 device,
                 codec_repo,
             )
@@ -529,8 +523,7 @@ def build(ctx):
             pm_text_col,
             pm_speaker_col,
             pm_caption_col,
-            pm_output_manifest,
-            pm_latent_dir,
+            pm_project_name,
             pm_device,
             pm_codec_repo,
         ]
@@ -545,8 +538,7 @@ def build(ctx):
             text_col,
             speaker_col,
             caption_col,
-            output_manifest,
-            latent_dir,
+            project_name,
             device,
             codec_repo,
         ):
@@ -560,8 +552,7 @@ def build(ctx):
                 text_col,
                 speaker_col,
                 caption_col,
-                output_manifest,
-                latent_dir,
+                project_name,
                 device,
                 codec_repo,
             )
@@ -588,8 +579,7 @@ def build(ctx):
             text_col,
             speaker_col,
             caption_col,
-            output_manifest,
-            latent_dir,
+            project_name,
             device,
             codec_repo,
         ):
@@ -603,8 +593,7 @@ def build(ctx):
                 text_col,
                 speaker_col,
                 caption_col,
-                output_manifest,
-                latent_dir,
+                project_name,
                 device,
                 codec_repo,
             )

@@ -913,7 +913,7 @@ def build(ctx):
             attention_backend,
             *_rest,
         ):
-            return _build_train_command(
+            return " ".join(_build_train_command(
                 manifest,
                 output_dir,
                 config_path,
@@ -927,7 +927,7 @@ def build(ctx):
                 save_mode,
                 num_gpus,
                 attention_backend,
-            )
+            ))
 
         for comp in [
             train_manifest,
