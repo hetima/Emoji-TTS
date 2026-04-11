@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import argparse
-
 import gradio as gr
 
 from ui.setting import cnfg
@@ -33,14 +32,10 @@ def build_ui(args: argparse.Namespace) -> gr.Blocks:
 
     initial_checkpoints = scan_checkpoints()
     default_checkpoint = initial_checkpoints[-1] if initial_checkpoints else ""
-    default_model_device_ = default_model_device()
-    default_codec_device_ = default_model_device()
-    device_choices = scan_checkpoints()
+    default_codec_device_ = default_model_device_ = default_model_device()
     from ui.common import list_available_runtime_devices
-
     device_choices = list_available_runtime_devices()
-    model_precision_choices = precision_choices_for_device(default_model_device_)
-    codec_precision_choices = precision_choices_for_device(default_codec_device_)
+    codec_precision_choices = model_precision_choices = precision_choices_for_device(default_model_device_)
     initial_configs = scan_configs()
     default_config = next(
         (c for c in initial_configs if cnfg.default_config in c),
@@ -91,7 +86,8 @@ def main() -> None:
     parser.add_argument(
         "--output-dir", default="gradio_outputs", help="output directory (default: gradio_outputs)"
     )
-    parser.add_argument("--lora-dir", default="lora", help="lora directory (default: lora)")
+    parser.add_argument("--lora-dir", default="", help="lora directory (default: lora)")
+    parser.add_argument("--data-root-dir", default="", help="data directory (default: data)")
     parser.add_argument(
         "--output-prefix", default="sample", help="output file name prefix (default: sample)"
     )
@@ -106,11 +102,23 @@ def main() -> None:
     allowed_paths = []
     if args.checkpoint:
         cnfg.checkpoints_dir = Path(args.checkpoint)
+        cnfg.train_root_dir = cnfg.checkpoints_dir / "train"
     if args.output_dir:
         cnfg.outputs_dir = Path(args.output_dir)
-        allowed_paths = [args.output_dir]
     if args.lora_dir:
         cnfg.lora_dir = Path(args.lora_dir)
+    if args.data_root_dir:
+        cnfg.data_root_dir = Path(args.data_root_dir)
+
+    allowed_paths = [
+        str(cnfg.checkpoints_dir),
+        str(cnfg.outputs_dir),
+        str(cnfg.lora_dir),
+        str(cnfg.speakers_dir),
+        str(cnfg.data_root_dir),
+        str(cnfg.train_root_dir),
+        str(cnfg.default_dataset_dir),
+    ]
 
     demo = build_ui(args)
     demo.queue(default_concurrency_limit=1)

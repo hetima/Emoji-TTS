@@ -35,6 +35,7 @@ def _save_yaml_config(config_path: str, data: dict) -> str:
 def _config_from_ui(
     manifest,
     output_dir,
+    project_name,
     batch_size,
     grad_accum,
     num_workers,
@@ -120,13 +121,16 @@ def _config_from_ui(
 def _build_train_command(
     manifest,
     output_dir,
+    project_name,
     config_path,
     use_early_stopping,
     es_patience,
     es_min_delta,
     use_ema,
     ema_decay,
+    init_enabled,
     resume_enabled,
+    init_checkpoint,
     resume_checkpoint,
     save_mode,
     num_gpus,
@@ -143,6 +147,7 @@ def _build_train_command(
     else:
         cmd = [sys.executable, str(cnfg.repo_dir / "train.py")]
 
+    output_dir = output_dir / project_name
     cmd += [
         "--config",
         str(config_path),
@@ -164,6 +169,8 @@ def _build_train_command(
 
     if resume_enabled and str(resume_checkpoint).strip():
         cmd += ["--resume", str(resume_checkpoint)]
+    elif init_enabled and str(init_checkpoint).strip():
+        cmd += ["--init-checkpoint", str(init_checkpoint)]
 
     if str(save_mode) in ("Fullのみ", "EMA + Full両方"):
         cmd += ["--save-full"]
@@ -177,13 +184,16 @@ def _build_train_command(
 def _start_train(
     manifest,
     output_dir,
+    project_name,
     config_path,
     use_early_stopping,
     es_patience,
     es_min_delta,
     use_ema,
     ema_decay,
+    init_enabled,
     resume_enabled,
+    init_checkpoint,
     resume_checkpoint,
     save_mode,
     num_gpus,
@@ -208,13 +218,16 @@ def _start_train(
     cmd_list = _build_train_command(
         manifest,
         output_dir,
+        project_name,
         tmp_config,
         use_early_stopping,
         es_patience,
         es_min_delta,
         use_ema,
         ema_decay,
+        init_enabled,
         resume_enabled,
+        init_checkpoint,
         resume_checkpoint,
         save_mode,
         num_gpus,
@@ -458,10 +471,17 @@ def build(ctx):
                 scale=3,
             )
             train_manifest_refresh = gr.Button("更新", scale=1)
-        train_output_dir = gr.Textbox(
-            label="学習出力フォルダ（チェックポイント保存先）",
-            value=str(cnfg.outputs_dir / "irodori_tts"),
-        )
+        with gr.Row():
+            train_output_dir = gr.Textbox(
+                label="学習出力フォルダ（チェックポイント保存先）",
+                value=str(cnfg.train_root_dir),
+                info="このフォルダの中にロジェクトフォルダ名のフォルダを作成します。"
+            )
+            project_name = gr.Textbox(
+                label="プロジェクトフォルダ名",
+                value="",
+                info=str(cnfg.train_root_dir) + " にこの名前のフォルダを作成します。"
+            )
 
         with gr.Row():
             num_gpus = gr.Slider(
@@ -480,32 +500,58 @@ def build(ctx):
                 info="sdpa=推奨 / flash2=FlashAttention2要インストール / sage=SageAttention要インストール",
             )
 
-        with gr.Accordion("ベースモデル・追加学習設定", open=True):
-            _default_safetensors = str(
-                cnfg.checkpoints_dir / "Aratako_Irodori-TTS-500M-v2" / "model.safetensors"
-            )
-            gr.Markdown(
-                "**--resume オプション設定**\n\n"
-                "- **オフ（スクラッチ学習）**: モデルを最初からランダム初期化して学習します。\n"
-                "- **オン・パス未入力**: `checkpoints/Aratako_Irodori-TTS-500M-v2/model.safetensors` が"
-                "存在すれば自動でロードして追加学習します（デフォルト動作）。\n"
-                "- **オン・パス入力**: 指定したファイルをベースに追加学習します。"
-                "`.safetensors` を指定するとstep=0から学習開始、`.pt` チェックポイントを指定すると"
-                "step/optimizer状態を引き継いで再開します。"
-            )
-            with gr.Row():
-                resume_enabled = gr.Checkbox(
-                    label="--resume を有効にする（追加学習 / チェックポイント再開）",
-                    value=True,
-                    scale=1,
-                )
-            resume_checkpoint = gr.Textbox(
-                label="ベースモデルパス（空欄 = デフォルト自動参照）",
-                value="",
-                placeholder=_default_safetensors,
-                info=f"空欄の場合、resume有効時は {_default_safetensors} を自動参照します。",
+        resume_enabled = gr.State(value=False)
+        init_enabled = gr.State(value=True)
+        def _on_source_change(mode):
+            is_init = mode == "init"
+            return (
+                gr.update(visible=is_init),
+                gr.update(value=is_init),
+                gr.update(visible=not is_init),
+                gr.update(value=not is_init),
             )
 
+        with gr.Accordion("ベースモデル", open=True):
+            data_source = gr.Radio(
+                label="学習方法",
+                choices=["init", "resume"],
+                value="init",
+            )
+
+            with gr.Row() as data_source_init:
+                val = ctx.initial_checkpoints[-1] if ctx.initial_checkpoints else None
+                for path in ctx.initial_checkpoints:
+                    if path.endswith("model.safetensors"):
+                        val = path
+                        break
+                init_checkpoint = gr.Dropdown(
+                    label="ベースモデル (.pt / .safetensors) step=0から学習開始",
+                    choices=ctx.initial_checkpoints,
+                    value=val,
+                    allow_custom_value=True,
+                    scale=4,
+                )
+                init_checkpoint_refresh_btn = gr.Button("更新", scale=1)
+
+            with gr.Row(visible=False) as data_source_resume:
+                resume_checkpoint = gr.Textbox(
+                    label="`.pt` チェックポイントを指定すると step/optimizer状態を引き継いで再開します。",
+                    value="",
+                )
+
+        init_checkpoint_refresh_btn.click(
+            lambda: gr.Dropdown(
+                choices=scan_checkpoints(), value=(scan_checkpoints() or [None])[-1]
+            ),
+            outputs=[init_checkpoint],
+        )
+
+        data_source.change(
+            _on_source_change,
+            inputs=[data_source],
+            outputs=[data_source_init, init_enabled, data_source_resume, resume_enabled],
+        )
+        
         with gr.Accordion("バッチ・精度設定", open=True):
             gr.Markdown("*バッチサイズと勾配蓄積ステップの積が実効バッチサイズになります。*")
             with gr.Row():
@@ -716,11 +762,11 @@ def build(ctx):
             )
 
         gr.Markdown("### 実行コマンドプレビュー")
-        train_cmd_preview = gr.Textbox(label="コマンドライン（確認用）", interactive=False, lines=3)
+        train_cmd_preview = gr.Textbox(label="コマンドライン（確認用。`--config` は `_train_tmp.yaml` に置き換えられます）", interactive=False, lines=3)
 
         with gr.Row():
-            train_start_btn = gr.Button("▶学習開始", variant="primary", size="lg")
-            train_stop_btn = gr.Button("⏹学習停止", variant="stop")
+            train_start_btn = gr.Button("学習開始", variant="primary", size="lg")
+            train_stop_btn = gr.Button("学習停止", variant="stop")
         train_status = gr.Textbox(label="実行状況", interactive=False, lines=2)
 
         gr.Markdown("### 学習ログ・グラフ")
@@ -840,6 +886,7 @@ def build(ctx):
         _train_cfg_inputs = [
             train_manifest,
             train_output_dir,
+            project_name,
             t_batch_size,
             t_grad_accum,
             t_num_workers,
@@ -884,13 +931,16 @@ def build(ctx):
         _train_exec_inputs = [
             train_manifest,
             train_output_dir,
+            project_name,
             preset_dropdown,
             t_early_stopping,
             t_es_patience,
             t_es_min_delta,
             t_use_ema,
             t_ema_decay,
+            init_enabled,
             resume_enabled,
+            init_checkpoint,
             resume_checkpoint,
             save_mode,
             num_gpus,
@@ -900,13 +950,16 @@ def build(ctx):
         def _update_train_cmd(
             manifest,
             output_dir,
+            project_name,
             config_path,
             use_early_stopping,
             es_patience,
             es_min_delta,
             use_ema,
             ema_decay,
+            init_enabled,
             resume_enabled,
+            init_checkpoint,
             resume_checkpoint,
             save_mode,
             num_gpus,
@@ -916,13 +969,16 @@ def build(ctx):
             return " ".join(_build_train_command(
                 manifest,
                 output_dir,
+                project_name,
                 config_path,
                 use_early_stopping,
                 es_patience,
                 es_min_delta,
                 use_ema,
                 ema_decay,
+                init_enabled,
                 resume_enabled,
+                init_checkpoint,
                 resume_checkpoint,
                 save_mode,
                 num_gpus,
@@ -932,13 +988,16 @@ def build(ctx):
         for comp in [
             train_manifest,
             train_output_dir,
+            project_name,
             preset_dropdown,
             t_early_stopping,
             t_es_patience,
             t_es_min_delta,
             t_use_ema,
             t_ema_decay,
+            init_enabled,
             resume_enabled,
+            init_checkpoint,
             resume_checkpoint,
             save_mode,
             num_gpus,

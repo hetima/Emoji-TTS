@@ -94,7 +94,7 @@ def scan_manifests() -> list[str]:
 
 def scan_train_checkpoints() -> list[str]:
     result = []
-    for p in cnfg.base_dir.glob("**/*.pt"):
+    for p in cnfg.train_root_dir.glob("**/*.pt"):
         if p.stat().st_size > 1024 * 1024:
             result.append(str(p))
     return sorted(result)

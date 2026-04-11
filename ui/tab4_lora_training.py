@@ -515,16 +515,15 @@ def build(ctx):
             lora_preset_status = gr.Textbox(label="プリセット操作結果", interactive=False, lines=1)
 
         with gr.Row():
+            val = ctx.initial_checkpoints[-1] if ctx.initial_checkpoints else None
+            for path in ctx.initial_checkpoints:
+                if path.endswith("model.safetensors"):
+                    val = path
+                    break
             lora_base_model = gr.Dropdown(
                 label="ベースモデル (.pt / .safetensors)",
                 choices=ctx.initial_checkpoints,
-                value=(
-                    str(cnfg.checkpoints_dir / "Aratako_Irodori-TTS-500M-v2" / "model.safetensors")
-                    if (
-                        cnfg.checkpoints_dir / "Aratako_Irodori-TTS-500M-v2" / "model.safetensors"
-                    ).exists()
-                    else (ctx.initial_checkpoints[-1] if ctx.initial_checkpoints else None)
-                ),
+                value=val,
                 allow_custom_value=True,
                 scale=4,
             )
